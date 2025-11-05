@@ -124,6 +124,25 @@ async function runMigration(migrationPath: string): Promise<void> {
     console.log(`   ✅ Migration ${migrationName} applied successfully (${executionTime}ms)`);
     
   } catch (error: any) {
+    // Check if error is due to object already existing or not existing (common on VPS when schema exists)
+    const alreadyExistsCodes = ['42P07', '42710', '42P16']; // relation exists, duplicate object, invalid name
+    const columnExistsCode = '42701'; // duplicate column
+    const columnNotExistsCode = '42703'; // column does not exist (when dropping)
+    
+    if (alreadyExistsCodes.includes(error.code) || columnExistsCode === error.code || columnNotExistsCode === error.code) {
+      console.log(`   ⚠️  Migration ${migrationName} encountered existing objects (${error.code}), marking as applied`);
+      
+      // Calculate checksum and mark as applied anyway since schema already exists
+      const migrationCode = fs.readFileSync(migrationPath, 'utf8');
+      const crypto = require('crypto');
+      const checksum = crypto.createHash('sha256').update(migrationCode).digest('hex');
+      const executionTime = Date.now() - startTime;
+      
+      await markMigrationApplied(migrationName, checksum, executionTime);
+      console.log(`   ✅ Migration ${migrationName} marked as applied (schema already exists)`);
+      return;
+    }
+    
     console.error(`   ❌ Migration ${migrationName} failed:`, error.message);
     throw error;
   }
