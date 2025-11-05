@@ -1,6 +1,6 @@
-# Deployment Guide - Automatic Database Migration System
+# Deployment Guide
 
-This guide explains how to use the automatic database migration system when deploying to your VPS.
+This guide explains how to deploy the backend API to a VPS and manage the automatic database migration system.
 
 ## Overview
 
@@ -190,14 +190,14 @@ pm2 restart backend
 When you add a new feature that requires database changes:
 
 1. Create a new migration file in `backend/src/database/migrations/`
-2. Name it with the next sequential number: `0004-add-feature.ts`
+2. Name it with the next sequential number: `0012-add-feature.ts`
 3. Export a default function that performs the migration
 4. Use `IF NOT EXISTS` for backward compatibility
 5. Commit and push to GitHub
 
 Example:
 ```typescript
-// backend/src/database/migrations/0004-add-feature.ts
+// backend/src/database/migrations/0012-add-feature.ts
 import pool from '../../config/database';
 
 export default async function runMigration() {
@@ -239,6 +239,35 @@ export default async function runMigration() {
 - Manually remove the migration record from `schema_migrations` table
 - Or create a new migration that undoes the changes
 
+### Common VPS Issues
+
+#### npm install fails with pg-native error
+```bash
+sudo apt update
+sudo apt install -y libpq-dev build-essential python3
+npm install
+```
+
+#### Database connection errors
+```bash
+# Check PostgreSQL is running
+sudo systemctl status postgresql
+
+# Start if stopped
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+```
+
+#### Port already in use
+```bash
+# Find what's using the port
+sudo lsof -i :5000
+
+# Kill the process or use PM2
+pm2 stop backend
+pm2 start dist/index.js --name backend
+```
+
 ## Best Practices
 
 1. ✅ Always use `IF NOT EXISTS` for tables/columns
@@ -259,6 +288,9 @@ npm run sync-db
 
 # Full deployment
 npm run deploy
+
+# Check migration status
+npm run check-migrations
 ```
 
 ## Notes
@@ -268,7 +300,4 @@ npm run deploy
 - Only new migrations are applied
 - Existing data is never deleted or modified
 - The system uses `ADD COLUMN IF NOT EXISTS` to avoid conflicts
-
-
-
 
