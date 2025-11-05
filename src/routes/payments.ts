@@ -1,0 +1,311 @@
+import express, { Request } from 'express';
+import pool from '../config/database';
+import { UserModel } from '../models/User';
+import { EmailService } from '../services/emailService';
+import { requireActiveSemester } from '../utils/semesterMiddleware';
+
+const router = express.Router();
+
+// Simple in-memory cache for payments summary by hostel
+type SummaryCacheItem = { data: any; expiresAt: number };
+const summaryCache: Map<number, SummaryCacheItem> = new Map();
+const SUMMARY_TTL_MS = 10_000; // 10 seconds
+
+async function resolveHostelIdForUser(userId: number, role: string): Promise<number | null> {
+  if (role === 'hostel_admin') {
+    const u = await UserModel.findById(userId);
+    return u?.hostel_id || null;
+  }
+  if (role === 'custodian') {
+    const r = await pool.query('SELECT hostel_id FROM custodians WHERE user_id = $1', [userId]);
+    const fromCustodians = r.rows[0]?.hostel_id || null;
+    if (fromCustodians) return fromCustodians;
+    const u = await UserModel.findById(userId);
+    return u?.hostel_id || null;
+  }
+  return null;
+}
+
+// Record a payment for a student in current hostel and send receipt
+router.post('/', async (req: Request, res) => {
+  const client = await pool.connect();
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    const hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role);
+    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    // Check for active semester before allowing payment recording
+    const semesterCheck = await requireActiveSemester(currentUser.id, hostelId);
+    if (!semesterCheck.success) {
+      return res.status(400).json({ success: false, message: semesterCheck.message });
+    }
+
+    const { user_id, amount, currency, purpose } = req.body as any;
+    if (!user_id || !amount) return res.status(400).json({ success: false, message: 'user_id and amount are required' });
+
+    // Validate student belongs to hostel
+    const student = await pool.query('SELECT id, email, name FROM users WHERE id = $1 AND hostel_id = $2 AND role = \'user\'', [user_id, hostelId]);
+    if (!student.rowCount) return res.status(404).json({ success: false, message: 'Student not found in this hostel' });
+
+    // Compute balance (simple: sum of payments negative; could be extended with expected fees table)
+    await client.query('BEGIN');
+    const payRes = await client.query(
+      'INSERT INTO payments (user_id, hostel_id, semester_id, amount, currency, purpose) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at',
+      [user_id, hostelId, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', purpose || 'booking']
+    );
+
+    // Get room assignment and expected price for this semester
+    const roomRes = await client.query(
+      `SELECT rm.room_number, rm.price::numeric AS expected_price
+       FROM student_room_assignments sra
+       JOIN rooms rm ON rm.id = sra.room_id
+       WHERE sra.user_id = $1 AND sra.semester_id = $2 AND sra.status = 'active'
+       LIMIT 1`,
+      [user_id, semesterCheck.semesterId]
+    );
+    const room = roomRes.rows[0] || null;
+
+    // Compute totals AFTER this payment for this semester
+    const sumRes = await client.query('SELECT COALESCE(SUM(amount),0) as total_paid FROM payments WHERE user_id = $1 AND semester_id = $2', [user_id, semesterCheck.semesterId]);
+    const totalPaidAfter = parseFloat(sumRes.rows[0]?.total_paid || '0');
+    const expected = room?.expected_price != null ? parseFloat(room.expected_price) : null;
+    const balanceAfter = expected != null ? (expected - totalPaidAfter) : null;
+
+    await client.query('COMMIT');
+
+    // Invalidate cached summary for this hostel
+    if (hostelId) {
+      summaryCache.delete(hostelId);
+    }
+
+    // Email receipt (hostel-branded)
+    const s = student.rows[0];
+    const hostelMeta = await pool.query('SELECT name FROM hostels WHERE id = $1', [hostelId]);
+    const hostelName = hostelMeta.rows[0]?.name || undefined;
+    const html = EmailService.generatePaymentReceiptEmail(
+      s.name,
+      s.email,
+      parseFloat(amount),
+      currency || 'UGX',
+      balanceAfter,
+      room?.room_number || null,
+      null,
+      new Date(payRes.rows[0].created_at).toLocaleString(),
+      hostelName,
+      currentUser.name,
+      'Cleared by',
+      null,
+      expected
+    );
+    // Send receipt
+    await EmailService.sendEmail({ to: s.email, subject: 'Payment Receipt - LTS Portal', html });
+
+    // If fully paid now, send thank you & welcome email
+    if (expected != null && balanceAfter != null && balanceAfter <= 0) {
+      // Fetch student profile for access_number
+      const profileRes = await pool.query('SELECT access_number FROM student_profiles WHERE user_id = $1', [user_id]);
+      const accessNumber = profileRes.rows[0]?.access_number || null;
+      
+      const thankYouHtml = EmailService.generateThankYouWelcomeEmail(
+        s.name,
+        s.email,
+        hostelName || 'Our Hostel',
+        room?.room_number || null,
+        accessNumber,
+        parseFloat(amount),
+        currency || 'UGX',
+        totalPaidAfter,
+        expected
+      );
+      await EmailService.sendEmail({ 
+        to: s.email, 
+        subject: `Thank You & Welcome to ${hostelName}! - All Balance Paid`, 
+        html: thankYouHtml 
+      });
+    }
+
+    res.status(201).json({ success: true, message: 'Payment recorded and receipt sent', data: { total_paid: totalPaidAfter, expected, balance_after: balanceAfter } });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Record payment error:', e);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Payments summary for current hostel (super_admin may pass ?hostel_id=...)
+router.get('/summary', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    let hostelId: number | null = null;
+    if (currentUser.role === 'super_admin') {
+      hostelId = req.query.hostel_id ? Number(req.query.hostel_id) : null;
+      if (!hostelId) return res.status(400).json({ success: false, message: 'hostel_id is required for super_admin' });
+    } else {
+      hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role);
+    }
+    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    // Optional semester filtering
+    const semesterId = req.query.semester_id ? Number(req.query.semester_id) : null;
+
+    // Serve from cache if fresh (but only if no semester filter)
+    const now = Date.now();
+    const cached = summaryCache.get(hostelId);
+    if (!semesterId && cached && cached.expiresAt > now) {
+      return res.json({ success: true, data: cached.data });
+    }
+
+    // Total collected (filtered by semester if provided)
+    const totalPaidQuery = semesterId
+      ? 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1 AND semester_id = $2'
+      : 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1';
+    const totalPaidRes = await pool.query(totalPaidQuery, semesterId ? [hostelId, semesterId] : [hostelId]);
+    const total_collected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
+
+    // Per-student expected vs paid (with optional semester filtering)
+    const assignmentFilter = semesterId ? 'AND sra.semester_id = $2' : '';
+    const paymentFilter = semesterId ? 'AND semester_id = $3' : '';
+    const queryParams = semesterId ? [hostelId, semesterId, semesterId, hostelId] : [hostelId, hostelId];
+    
+    const rowsRes = await pool.query(
+      `       WITH active_assignment AS (
+        SELECT sra.user_id, rm.price::numeric AS expected, rm.room_number
+        FROM student_room_assignments sra
+        JOIN rooms rm ON rm.id = sra.room_id
+        WHERE sra.status = 'active' AND rm.hostel_id = $1
+        ${assignmentFilter}
+      ),
+      paid AS (
+        SELECT user_id, COALESCE(SUM(amount),0)::numeric AS paid
+        FROM payments
+        WHERE hostel_id = $1
+        ${paymentFilter}
+        GROUP BY user_id
+      )
+      SELECT u.id AS user_id, u.name, u.email,
+             sp.access_number, sp.phone, sp.whatsapp,
+             aa.expected, aa.room_number,
+             COALESCE(p.paid, 0)::numeric AS paid,
+             CASE WHEN aa.expected IS NULL THEN NULL ELSE (aa.expected - COALESCE(p.paid,0))::numeric END AS balance
+      FROM users u
+      LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      LEFT JOIN active_assignment aa ON aa.user_id = u.id
+      LEFT JOIN paid p ON p.user_id = u.id
+      WHERE u.role = 'user' AND u.hostel_id = ${semesterId ? '$4' : '$2'}
+      ORDER BY u.name ASC`,
+      queryParams
+    );
+
+    const students = rowsRes.rows.map(r => ({
+      user_id: r.user_id,
+      name: r.name,
+      email: r.email,
+      access_number: r.access_number || null,
+      phone: r.phone || null,
+      whatsapp: r.whatsapp || null,
+      room_number: r.room_number || null,
+      expected: r.expected !== null ? parseFloat(r.expected) : null,
+      paid: parseFloat(r.paid || 0),
+      balance: r.balance !== null ? parseFloat(r.balance) : null,
+      status: r.expected === null ? 'unassigned' : (parseFloat(r.paid || 0) >= parseFloat(r.expected || 0) ? 'paid' : (parseFloat(r.paid || 0) > 0 ? 'partial' : 'unpaid'))
+    }));
+
+    const total_outstanding = students.reduce((sum, s) => sum + (s.balance && s.balance > 0 ? s.balance : 0), 0);
+
+    const payload = { total_collected, total_outstanding, students };
+    summaryCache.set(hostelId, { data: payload, expiresAt: now + SUMMARY_TTL_MS });
+    res.json({ success: true, data: payload });
+  } catch (e) {
+    console.error('Payments summary error:', e);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// List payments (super_admin may pass ?hostel_id=...)
+router.get('/', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    let hostelId: number | null = null;
+    if (currentUser.role === 'super_admin') {
+      hostelId = req.query.hostel_id ? Number(req.query.hostel_id) : null;
+      if (!hostelId) return res.status(400).json({ success: false, message: 'hostel_id is required for super_admin' });
+    } else {
+      hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role);
+    }
+    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const search = (req.query.search as string | undefined)?.trim().toLowerCase();
+    const userIdFilter = req.query.user_id ? Number(req.query.user_id) : undefined;
+    const semesterId = req.query.semester_id ? Number(req.query.semester_id) : null;
+
+    // Pagination with sane defaults/caps
+    const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+    const limitRaw = Math.max(1, parseInt((req.query.limit as string) || '20', 10));
+    const limit = Math.min(100, limitRaw);
+    const offset = (page - 1) * limit;
+
+    const params: any[] = [hostelId];
+    let paramIndex = 2;
+    const where: string[] = ['p.hostel_id = $1'];
+    if (semesterId !== null) {
+      where.push(`p.semester_id = $${paramIndex}`);
+      params.push(semesterId);
+      paramIndex++;
+    }
+    if (typeof userIdFilter === 'number' && !Number.isNaN(userIdFilter)) {
+      where.push(`p.user_id = $${paramIndex}`);
+      params.push(userIdFilter);
+      paramIndex++;
+    }
+    if (search) {
+      where.push(`(LOWER(u.name) LIKE $${paramIndex} OR LOWER(u.email) LIKE $${paramIndex} OR LOWER(p.purpose) LIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    const query = `
+      SELECT p.id, p.user_id, p.amount, p.currency, p.purpose, p.created_at,
+             u.name as student_name, u.email as student_email
+      FROM payments p
+      JOIN users u ON u.id = p.user_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY p.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}`;
+
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows, page, limit });
+  } catch (e) {
+    console.error('List payments error:', e);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+export default router;
+
+
+
+
+
+
+
+
+
+
+
