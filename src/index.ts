@@ -57,18 +57,25 @@ const getCorsOrigins = (): string[] | string => {
     if (productionUrl) {
       return [productionUrl];
     }
-    // If not set, allow any origin (fallback for development-like testing)
-    // WARNING: This is less secure - should be configured properly in production
-    return '*';
+    // If not set, include production frontend as fallback
+    // WARNING: For better security, set FRONTEND_URL or FRONTEND_URLS in .env
+    return [
+      'http://64.23.169.136',
+      'http://64.23.169.136:3000',
+      'http://64.23.169.136:80',
+    ];
   }
   
-  // Development: Allow localhost on common ports
+  // Development: Allow localhost on common ports and production frontend
   return [
     'http://localhost:3000',
     'http://localhost:5173', // Vite default
     'http://localhost:5174',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:5173',
+    'http://64.23.169.136', // Production frontend
+    'http://64.23.169.136:3000', // Production frontend on port 3000
+    'http://64.23.169.136:80', // Production frontend on port 80
   ];
 };
 
