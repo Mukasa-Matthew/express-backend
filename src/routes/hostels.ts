@@ -412,6 +412,9 @@ router.post('/', async (req, res) => {
           console.log(`   Hostel: ${hostel.name}`);
           console.log(`   Admin: ${admin_name}`);
           
+          // Ensure email service is initialized
+          EmailService.initialize();
+          
           const emailSent = await EmailService.sendEmail(emailOptions);
           
           if (emailSent) {
