@@ -302,3 +302,5 @@ npm run check-migrations
 - The system uses `ADD COLUMN IF NOT EXISTS` to avoid conflicts
 
 
+
+

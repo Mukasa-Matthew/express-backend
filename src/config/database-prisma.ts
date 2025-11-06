@@ -10,3 +10,5 @@ export default prisma;
 export { PrismaClient };
 
 
+
+

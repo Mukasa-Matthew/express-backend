@@ -181,20 +181,26 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 async function startServer() {
   try {
     // Initialize database (create tables and setup super admin)
+    // This will automatically create tables from SQL file if they don't exist
     await initializeDatabase();
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔐 Auth endpoints: http://localhost:${PORT}/api/auth`);
-});
   } catch (error: any) {
-    console.error('❌ Failed to start server:', error);
-    // Don't exit - let the process handle it naturally
-    // This prevents restart loops
-    throw error;
+    console.error('❌ Database initialization failed:', error.message);
+    console.error('❌ Server cannot start without database initialization');
+    console.log('');
+    console.log('🔧 Please check:');
+    console.log('   1. PostgreSQL is running');
+    console.log('   2. Database exists: lts_portal');
+    console.log('   3. .env file has correct database credentials');
+    console.log('');
+    process.exit(1);
   }
+
+  // Start server
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+    console.log(`🔐 Auth endpoints: http://localhost:${PORT}/api/auth`);
+  });
 }
 
 startServer();
