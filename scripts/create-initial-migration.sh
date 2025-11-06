@@ -18,3 +18,6 @@ echo "3. Or for development: npm run prisma:migrate"
 echo "4. Start your server: npm run dev"
 
 
+
+
+

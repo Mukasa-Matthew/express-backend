@@ -19,27 +19,59 @@ export class EmailService {
     const secureFromEnv = (process.env.SMTP_SECURE || '').toLowerCase();
     const secure = secureFromEnv === 'true' || port === 465; // auto-secure for 465
 
+    // For Gmail on port 587, require TLS
+    const requireTLS = !secure && port === 587;
+
     this.transporter = nodemailer.createTransport({
       host,
       port,
       secure,
+      requireTLS,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
+      tls: {
+        // Do not fail on invalid certificates
+        rejectUnauthorized: false,
+      },
     });
+  }
+
+  static async verifyConnection(): Promise<boolean> {
+    try {
+      if (!this.transporter) {
+        this.initialize();
+      }
+      await this.transporter.verify();
+      console.log('✅ Email service connection verified');
+      return true;
+    } catch (error: any) {
+      console.error('❌ Email service connection failed:', error.message);
+      return false;
+    }
   }
 
   static async sendEmail(options: EmailOptions): Promise<boolean> {
     try {
       // Check if email is configured
       if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        console.log('ðŸ“§ Email not configured - credentials will be logged instead');
+        console.log('📧 Email not configured - credentials will be logged instead');
         this.logCredentialsToConsole(options);
         return true; // Return true to not break the flow
       }
 
+      // Initialize or reinitialize transporter if needed
       if (!this.transporter) {
+        this.initialize();
+      }
+
+      // Verify connection before sending (only log, don't fail)
+      try {
+        await this.transporter.verify();
+      } catch (verifyError: any) {
+        console.warn('⚠️ Email connection verification failed, attempting to send anyway:', verifyError.message);
+        // Reinitialize transporter in case of connection issues
         this.initialize();
       }
 
@@ -52,11 +84,17 @@ export class EmailService {
       };
 
       const result = await this.transporter.sendMail(mailOptions);
-      console.log('ðŸ“§ Email sent successfully:', result.messageId);
+      console.log('📧 Email sent successfully:', result.messageId);
       return true;
-    } catch (error) {
-      console.error('ðŸ“§ Email sending failed:', error);
-      console.log('ðŸ“§ Falling back to console logging...');
+    } catch (error: any) {
+      console.error('📧 Email sending failed:', error.message || error);
+      if (error.code) {
+        console.error('   Error code:', error.code);
+      }
+      if (error.response) {
+        console.error('   SMTP response:', error.response);
+      }
+      console.log('📧 Falling back to console logging...');
       this.logCredentialsToConsole(options);
       return true; // Return true to not break the flow
     }

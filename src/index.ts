@@ -24,6 +24,7 @@ import publicRoutes from './routes/public';
 import hostelImagesRoutes from './routes/hostel-images';
 import { SubscriptionNotificationService } from './services/subscriptionNotificationService';
 import { SemesterService } from './services/semesterService';
+import { EmailService } from './services/emailService';
 import { initializeDatabase } from './database/initialize';
 import path from 'path';
 
@@ -31,7 +32,7 @@ import path from 'path';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = parseInt(process.env.PORT || '5000', 10);
 
 // Security: Helmet
 app.use(helmet({
@@ -202,8 +203,17 @@ async function startServer() {
     process.exit(1);
   }
 
+  // Initialize email service
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    console.log('📧 Initializing email service...');
+    await EmailService.verifyConnection();
+  } else {
+    console.log('⚠️  Email service not configured (SMTP_USER or SMTP_PASS not set)');
+    console.log('   Emails will be logged to console instead');
+  }
+
   // Start server
-  app.listen(PORT, () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
     console.log(`🔐 Auth endpoints: http://localhost:${PORT}/api/auth`);
