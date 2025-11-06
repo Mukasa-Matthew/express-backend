@@ -1,14 +1,15 @@
-import pool from '../config/database';
+import prisma from '../lib/prisma';
+import { User as PrismaUser, Prisma } from '@prisma/client';
+type PrismaUserUpdateInput = Prisma.UserUpdateInput;
 
 export interface User {
   id: number;
-  username?: string;
+  username?: string | null;
   email: string;
   name: string;
   password: string;
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
-  // Note: 'custodian' is also supported via DB, but typical user logins are admins/tenants.
-  hostel_id?: number;
+  hostel_id?: number | null;
   profile_picture?: string | null;
   created_at: Date;
   updated_at: Date;
@@ -23,73 +24,174 @@ export interface CreateUserData {
   hostel_id?: number;
 }
 
+// Helper function to convert Prisma User to our User interface
+function prismaUserToUser(prismaUser: PrismaUser): User {
+  return {
+    id: prismaUser.id,
+    username: prismaUser.username,
+    email: prismaUser.email,
+    name: prismaUser.name,
+    password: prismaUser.password,
+    role: prismaUser.role as User['role'],
+    hostel_id: prismaUser.hostelId,
+    profile_picture: prismaUser.profilePicture,
+    created_at: prismaUser.createdAt,
+    updated_at: prismaUser.updatedAt,
+  };
+}
+
 export class UserModel {
   static async create(userData: CreateUserData): Promise<User> {
-    const { email, name, password, role, username } = userData;
-    const query = `
-      INSERT INTO users (email, name, password, role, username, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-      RETURNING id, email, name, role, username, hostel_id, profile_picture, created_at, updated_at
-    `;
+    const { email, name, password, role, username, hostel_id } = userData;
     
-    const result = await pool.query(query, [email, name, password, role, username || null]);
-    return result.rows[0];
+    const prismaUser = await prisma.user.create({
+      data: {
+        email,
+        name,
+        password,
+        role,
+        username: username || null,
+        hostelId: hostel_id || null,
+      },
+    });
+    
+    return prismaUserToUser(prismaUser);
   }
 
   static async findByEmail(email: string): Promise<User | null> {
-    const query = 'SELECT * FROM users WHERE lower(email) = lower($1)';
-    const result = await pool.query(query, [email]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findFirst({
+      where: {
+        email: {
+          equals: email,
+          mode: 'insensitive',
+        },
+      },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
   }
 
   static async findByUsername(username: string): Promise<User | null> {
-    const query = 'SELECT * FROM users WHERE lower(username) = lower($1)';
-    const result = await pool.query(query, [username]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findFirst({
+      where: {
+        username: {
+          equals: username,
+          mode: 'insensitive',
+        },
+      },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
   }
 
   static async findByEmailAndRole(email: string, role: string): Promise<User | null> {
-    const query = 'SELECT * FROM users WHERE email = $1 AND role = $2';
-    const result = await pool.query(query, [email, role]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findFirst({
+      where: {
+        email: {
+          equals: email,
+          mode: 'insensitive',
+        },
+        role: role as PrismaUser['role'],
+      },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
   }
 
   static async findByEmailAndHostel(email: string, hostelId: number): Promise<User | null> {
-    const query = 'SELECT * FROM users WHERE email = $1 AND hostel_id = $2';
-    const result = await pool.query(query, [email, hostelId]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findFirst({
+      where: {
+        email: {
+          equals: email,
+          mode: 'insensitive',
+        },
+        hostelId,
+      },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
   }
 
   static async findById(id: number): Promise<User | null> {
-    const query = 'SELECT id, email, name, role, hostel_id, username, profile_picture, created_at, updated_at FROM users WHERE id = $1';
-    const result = await pool.query(query, [id]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        hostelId: true,
+        username: true,
+        profilePicture: true,
+        createdAt: true,
+        updatedAt: true,
+        password: false, // Don't return password by default
+      },
+    });
+    
+    if (!prismaUser) return null;
+    
+    // Add password field as empty string for type compatibility
+    return {
+      ...prismaUserToUser(prismaUser as PrismaUser),
+      password: '',
+    };
   }
 
   static async findByIdWithPassword(id: number): Promise<User | null> {
-    const query = 'SELECT * FROM users WHERE id = $1';
-    const result = await pool.query(query, [id]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.findUnique({
+      where: { id },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
   }
 
   static async updatePassword(id: number, hashedPassword: string): Promise<void> {
-    const query = 'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2';
-    await pool.query(query, [hashedPassword, id]);
+    await prisma.user.update({
+      where: { id },
+      data: {
+        password: hashedPassword,
+      },
+    });
   }
 
   static async update(id: number, updateData: Partial<User>): Promise<User | null> {
-    const fields = Object.keys(updateData);
-    const values = Object.values(updateData);
-    const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ');
+    // Map our User interface fields to Prisma fields
+    const prismaUpdateData: PrismaUserUpdateInput = {};
     
-    const query = `
-      UPDATE users 
-      SET ${setClause}, updated_at = NOW()
-      WHERE id = $1
-      RETURNING id, email, name, role, hostel_id, profile_picture, created_at, updated_at
-    `;
+    if (updateData.username !== undefined) prismaUpdateData.username = updateData.username || null;
+    if (updateData.email !== undefined) prismaUpdateData.email = updateData.email;
+    if (updateData.name !== undefined) prismaUpdateData.name = updateData.name;
+    if (updateData.role !== undefined) prismaUpdateData.role = updateData.role as PrismaUser['role'];
+    if (updateData.hostel_id !== undefined) {
+      if (updateData.hostel_id) {
+        prismaUpdateData.hostel = { connect: { id: updateData.hostel_id } };
+      } else {
+        prismaUpdateData.hostel = { disconnect: true };
+      }
+    }
+    if (updateData.profile_picture !== undefined) prismaUpdateData.profilePicture = updateData.profile_picture || null;
     
-    const result = await pool.query(query, [id, ...values]);
-    return result.rows[0] || null;
+    const prismaUser = await prisma.user.update({
+      where: { id },
+      data: prismaUpdateData,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        hostelId: true,
+        username: true,
+        profilePicture: true,
+        createdAt: true,
+        updatedAt: true,
+        password: false,
+      },
+    });
+    
+    return {
+      ...prismaUserToUser(prismaUser as PrismaUser),
+      password: '',
+    };
   }
 }

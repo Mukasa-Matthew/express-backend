@@ -301,3 +301,4 @@ npm run check-migrations
 - Existing data is never deleted or modified
 - The system uses `ADD COLUMN IF NOT EXISTS` to avoid conflicts
 
+

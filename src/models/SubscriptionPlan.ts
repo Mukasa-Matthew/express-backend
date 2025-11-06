@@ -1,4 +1,5 @@
-import pool from '../config/database';
+import prisma from '../lib/prisma';
+import { SubscriptionPlan as PrismaSubscriptionPlan, HostelSubscription as PrismaHostelSubscription, Prisma } from '@prisma/client';
 
 export interface SubscriptionPlan {
   id: number;
@@ -20,121 +21,201 @@ export interface HostelSubscription {
   end_date: Date;
   amount_paid: number;
   status: 'active' | 'expired' | 'cancelled';
-  payment_method?: string;
-  payment_reference?: string;
+  payment_method?: string | null;
+  payment_reference?: string | null;
   created_at: Date;
   updated_at: Date;
 }
 
+// Helper functions
+function prismaPlanToPlan(prismaPlan: PrismaSubscriptionPlan): SubscriptionPlan {
+  return {
+    id: prismaPlan.id,
+    name: prismaPlan.name,
+    description: prismaPlan.description || '',
+    duration_months: prismaPlan.durationMonths,
+    price_per_month: Number(prismaPlan.pricePerMonth || 0),
+    total_price: Number(prismaPlan.totalPrice || 0),
+    is_active: prismaPlan.isActive,
+    created_at: prismaPlan.createdAt,
+    updated_at: prismaPlan.updatedAt,
+  };
+}
+
+function prismaSubscriptionToSubscription(
+  prismaSub: PrismaHostelSubscription & { plan?: PrismaSubscriptionPlan }
+): HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number } {
+  return {
+    id: prismaSub.id,
+    hostel_id: prismaSub.hostelId,
+    plan_id: prismaSub.planId,
+    start_date: prismaSub.startDate,
+    end_date: prismaSub.endDate,
+    amount_paid: Number(prismaSub.amountPaid),
+    status: prismaSub.status as HostelSubscription['status'],
+    payment_method: prismaSub.paymentMethod,
+    payment_reference: prismaSub.paymentReference,
+    created_at: prismaSub.createdAt,
+    updated_at: prismaSub.updatedAt,
+    plan_name: prismaSub.plan?.name,
+    duration_months: prismaSub.plan?.durationMonths,
+    total_price: Number(prismaSub.plan?.totalPrice || 0),
+  };
+}
+
 export class SubscriptionPlanModel {
   static async findAll(): Promise<SubscriptionPlan[]> {
-    const result = await pool.query(
-      'SELECT * FROM subscription_plans WHERE is_active = true ORDER BY duration_months ASC'
-    );
-    return result.rows;
+    const plans = await prisma.subscriptionPlan.findMany({
+      where: { isActive: true },
+      orderBy: { durationMonths: 'asc' },
+    });
+    
+    return plans.map(prismaPlanToPlan);
   }
 
   static async findById(id: number): Promise<SubscriptionPlan | null> {
-    const result = await pool.query(
-      'SELECT * FROM subscription_plans WHERE id = $1 AND is_active = true',
-      [id]
-    );
-    return result.rows[0] || null;
+    const plan = await prisma.subscriptionPlan.findFirst({
+      where: {
+        id,
+        isActive: true,
+      },
+    });
+    
+    return plan ? prismaPlanToPlan(plan) : null;
   }
 
   static async create(plan: Omit<SubscriptionPlan, 'id' | 'created_at' | 'updated_at'>): Promise<SubscriptionPlan> {
-    const result = await pool.query(
-      `INSERT INTO subscription_plans (name, description, duration_months, price, price_per_month, total_price, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [plan.name, plan.description, plan.duration_months, plan.total_price, plan.price_per_month, plan.total_price, plan.is_active]
-    );
-    return result.rows[0];
+    const prismaPlan = await prisma.subscriptionPlan.create({
+      data: {
+        name: plan.name,
+        description: plan.description,
+        durationMonths: plan.duration_months,
+        price: plan.total_price,
+        pricePerMonth: plan.price_per_month,
+        totalPrice: plan.total_price,
+        isActive: plan.is_active,
+        status: 'active',
+        features: [],
+      },
+    });
+    
+    return prismaPlanToPlan(prismaPlan);
   }
 
   static async update(id: number, updates: Partial<SubscriptionPlan>): Promise<SubscriptionPlan | null> {
-    const fields = Object.keys(updates).filter(key => key !== 'id' && key !== 'created_at' && key !== 'updated_at');
-    const values = fields.map(field => updates[field as keyof SubscriptionPlan]);
+    const prismaUpdateData: Prisma.SubscriptionPlanUpdateInput = {};
     
-    // If total_price is being updated, also update price to match
-    if (updates.total_price !== undefined && !fields.includes('price')) {
-      fields.push('price');
-      values.push(updates.total_price);
+    if (updates.name !== undefined) prismaUpdateData.name = updates.name;
+    if (updates.description !== undefined) prismaUpdateData.description = updates.description;
+    if (updates.duration_months !== undefined) prismaUpdateData.durationMonths = updates.duration_months;
+    if (updates.price_per_month !== undefined) prismaUpdateData.pricePerMonth = updates.price_per_month;
+    if (updates.total_price !== undefined) {
+      prismaUpdateData.totalPrice = updates.total_price;
+      prismaUpdateData.price = updates.total_price; // Also update price field
     }
+    if (updates.is_active !== undefined) prismaUpdateData.isActive = updates.is_active;
     
-    const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ');
+    if (Object.keys(prismaUpdateData).length === 0) return null;
     
-    if (fields.length === 0) return null;
+    const prismaPlan = await prisma.subscriptionPlan.update({
+      where: { id },
+      data: prismaUpdateData,
+    });
     
-    const result = await pool.query(
-      `UPDATE subscription_plans SET ${setClause}, updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [id, ...values]
-    );
-    return result.rows[0] || null;
+    return prismaPlanToPlan(prismaPlan);
   }
 
   static async delete(id: number): Promise<boolean> {
-    const result = await pool.query(
-      'UPDATE subscription_plans SET is_active = false, updated_at = NOW() WHERE id = $1',
-      [id]
-    );
-    return (result.rowCount || 0) > 0;
+    try {
+      await prisma.subscriptionPlan.update({
+        where: { id },
+        data: {
+          isActive: false,
+          status: 'archived',
+        },
+      });
+      return true;
+    } catch (error: any) {
+      if (error.code === 'P2025') return false;
+      throw error;
+    }
   }
 }
 
 export class HostelSubscriptionModel {
   static async create(subscription: Omit<HostelSubscription, 'id' | 'created_at' | 'updated_at'>): Promise<HostelSubscription> {
-    const result = await pool.query(
-      `INSERT INTO hostel_subscriptions (hostel_id, plan_id, start_date, end_date, amount_paid, status, payment_method, payment_reference)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [subscription.hostel_id, subscription.plan_id, subscription.start_date, subscription.end_date, 
-       subscription.amount_paid, subscription.status, subscription.payment_method, subscription.payment_reference]
-    );
-    return result.rows[0];
+    const prismaSub = await prisma.hostelSubscription.create({
+      data: {
+        hostelId: subscription.hostel_id,
+        planId: subscription.plan_id,
+        startDate: subscription.start_date,
+        endDate: subscription.end_date,
+        amountPaid: subscription.amount_paid,
+        status: subscription.status as PrismaHostelSubscription['status'],
+        paymentMethod: subscription.payment_method || null,
+        paymentReference: subscription.payment_reference || null,
+      },
+    });
+    
+    return prismaSubscriptionToSubscription(prismaSub);
   }
 
-  static async findByHostelId(hostelId: number): Promise<HostelSubscription[]> {
-    const result = await pool.query(
-      `SELECT hs.*, sp.name as plan_name, sp.duration_months, sp.total_price
-       FROM hostel_subscriptions hs
-       JOIN subscription_plans sp ON hs.plan_id = sp.id
-       WHERE hs.hostel_id = $1
-       ORDER BY hs.created_at DESC`,
-      [hostelId]
-    );
-    return result.rows;
+  static async findByHostelId(hostelId: number): Promise<(HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number })[]> {
+    const subscriptions = await prisma.hostelSubscription.findMany({
+      where: { hostelId },
+      include: {
+        plan: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    
+    return subscriptions.map(prismaSubscriptionToSubscription);
   }
 
-  static async findActiveByHostelId(hostelId: number): Promise<HostelSubscription | null> {
-    const result = await pool.query(
-      `SELECT hs.*, sp.name as plan_name, sp.duration_months, sp.total_price
-       FROM hostel_subscriptions hs
-       JOIN subscription_plans sp ON hs.plan_id = sp.id
-       WHERE hs.hostel_id = $1 AND hs.status = 'active' AND hs.end_date > NOW()
-       ORDER BY hs.end_date DESC
-       LIMIT 1`,
-      [hostelId]
-    );
-    return result.rows[0] || null;
+  static async findActiveByHostelId(hostelId: number): Promise<(HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number }) | null> {
+    const subscription = await prisma.hostelSubscription.findFirst({
+      where: {
+        hostelId,
+        status: 'active',
+        endDate: { gt: new Date() },
+      },
+      include: {
+        plan: true,
+      },
+      orderBy: { endDate: 'desc' },
+    });
+    
+    return subscription ? prismaSubscriptionToSubscription(subscription) : null;
   }
 
   static async updateStatus(id: number, status: 'active' | 'expired' | 'cancelled'): Promise<boolean> {
-    const result = await pool.query(
-      'UPDATE hostel_subscriptions SET status = $1, updated_at = NOW() WHERE id = $2',
-      [status, id]
-    );
-    return (result.rowCount || 0) > 0;
+    try {
+      await prisma.hostelSubscription.update({
+        where: { id },
+        data: { status: status as PrismaHostelSubscription['status'] },
+      });
+      return true;
+    } catch (error: any) {
+      if (error.code === 'P2025') return false;
+      throw error;
+    }
   }
 
-  static async getExpiredSubscriptions(): Promise<HostelSubscription[]> {
-    const result = await pool.query(
-      `SELECT hs.*, sp.name as plan_name, h.name as hostel_name
-       FROM hostel_subscriptions hs
-       JOIN subscription_plans sp ON hs.plan_id = sp.id
-       JOIN hostels h ON hs.hostel_id = h.id
-       WHERE hs.status = 'active' AND hs.end_date < NOW()`
-    );
-    return result.rows;
+  static async getExpiredSubscriptions(): Promise<(HostelSubscription & { plan_name?: string; hostel_name?: string })[]> {
+    const subscriptions = await prisma.hostelSubscription.findMany({
+      where: {
+        status: 'active',
+        endDate: { lt: new Date() },
+      },
+      include: {
+        plan: true,
+        hostel: true,
+      },
+    });
+    
+    return subscriptions.map(sub => ({
+      ...prismaSubscriptionToSubscription(sub),
+      hostel_name: sub.hostel.name,
+    }));
   }
 }

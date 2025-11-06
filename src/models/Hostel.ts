@@ -1,22 +1,24 @@
-import pool from '../config/database';
+import prisma from '../lib/prisma';
+import { Hostel as PrismaHostel, Prisma } from '@prisma/client';
+type PrismaHostelUpdateInput = Prisma.HostelUpdateInput;
 
 export interface Hostel {
   id: number;
   name: string;
   address: string;
-  description?: string;
+  description?: string | null;
   total_rooms: number;
   available_rooms: number;
-  contact_phone?: string;
-  contact_email?: string;
+  contact_phone?: string | null;
+  contact_email?: string | null;
   status: 'active' | 'inactive' | 'maintenance' | 'suspended';
-  university_id?: number;
-  region_id?: number;
-  distance_from_campus?: number;
-  amenities?: string;
-  price_per_room?: number;
-  rules_and_regulations?: string;
-  occupancy_type?: 'male' | 'female' | 'mixed';
+  university_id?: number | null;
+  region_id?: number | null;
+  distance_from_campus?: number | null;
+  amenities?: string | null;
+  price_per_room?: number | null;
+  rules_and_regulations?: string | null;
+  occupancy_type?: 'male' | 'female' | 'mixed' | null;
   current_subscription_id?: number | null;
   created_at: Date;
   updated_at: Date;
@@ -44,101 +46,168 @@ export interface CreateHostelWithAdminData extends CreateHostelData {
   subscription_plan_id: string;
 }
 
+// Helper function to convert Prisma Hostel to our Hostel interface
+function prismaHostelToHostel(prismaHostel: PrismaHostel): Hostel {
+  return {
+    id: prismaHostel.id,
+    name: prismaHostel.name,
+    address: prismaHostel.address,
+    description: prismaHostel.description,
+    total_rooms: prismaHostel.totalRooms,
+    available_rooms: prismaHostel.availableRooms,
+    contact_phone: prismaHostel.contactPhone,
+    contact_email: prismaHostel.contactEmail,
+    status: prismaHostel.status as Hostel['status'],
+    university_id: prismaHostel.universityId,
+    region_id: prismaHostel.regionId,
+    distance_from_campus: prismaHostel.distanceFromCampus ? Number(prismaHostel.distanceFromCampus) : null,
+    amenities: prismaHostel.amenities,
+    price_per_room: prismaHostel.pricePerRoom,
+    rules_and_regulations: prismaHostel.rulesAndRegulations,
+    occupancy_type: prismaHostel.occupancyType as Hostel['occupancy_type'],
+    current_subscription_id: prismaHostel.currentSubscriptionId,
+    created_at: prismaHostel.createdAt,
+    updated_at: prismaHostel.updatedAt,
+  };
+}
+
 export class HostelModel {
   static async create(hostelData: CreateHostelData): Promise<Hostel> {
-    const { 
-      name, 
-      address, 
-      description, 
-      total_rooms, 
-      available_rooms, 
-      contact_phone, 
-      contact_email, 
+    const {
+      name,
+      address,
+      description,
+      total_rooms,
+      available_rooms,
+      contact_phone,
+      contact_email,
       status,
       university_id,
-      occupancy_type
+      occupancy_type,
     } = hostelData;
-    
-    const query = `
-      INSERT INTO hostels (
-        name, address, description, total_rooms, available_rooms, 
-        contact_phone, contact_email, status, university_id, occupancy_type,
-        created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-      RETURNING *
-    `;
-    
-    const result = await pool.query(query, [
-      name, 
-      address, 
-      description, 
-      total_rooms, 
-      available_rooms, 
-      contact_phone, 
-      contact_email, 
-      status || 'active',
-      university_id || null,
-      occupancy_type || null
-    ]);
-    return result.rows[0];
+
+    const prismaHostel = await prisma.hostel.create({
+      data: {
+        name,
+        address,
+        description: description || null,
+        totalRooms: total_rooms,
+        availableRooms: available_rooms,
+        contactPhone: contact_phone || null,
+        contactEmail: contact_email || null,
+        status: (status || 'active') as PrismaHostel['status'],
+        universityId: university_id || null,
+        occupancyType: occupancy_type || null,
+      },
+    });
+
+    return prismaHostelToHostel(prismaHostel);
   }
 
   static async findAll(): Promise<Hostel[]> {
-    const query = 'SELECT * FROM hostels ORDER BY created_at DESC';
-    const result = await pool.query(query);
-    return result.rows;
+    const prismaHostels = await prisma.hostel.findMany({
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    return prismaHostels.map(prismaHostelToHostel);
   }
 
   static async findById(id: number): Promise<Hostel | null> {
-    const query = 'SELECT * FROM hostels WHERE id = $1';
-    const result = await pool.query(query, [id]);
-    return result.rows[0] || null;
+    const prismaHostel = await prisma.hostel.findUnique({
+      where: { id },
+    });
+
+    return prismaHostel ? prismaHostelToHostel(prismaHostel) : null;
   }
 
   static async update(id: number, hostelData: Partial<CreateHostelData>): Promise<Hostel | null> {
-    const fields = Object.keys(hostelData);
-    const values = Object.values(hostelData);
-    const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ');
-    
-    const query = `
-      UPDATE hostels 
-      SET ${setClause}, updated_at = NOW()
-      WHERE id = $1
-      RETURNING *
-    `;
-    
-    const result = await pool.query(query, [id, ...values]);
-    return result.rows[0] || null;
+    const prismaUpdateData: PrismaHostelUpdateInput = {};
+
+    if (hostelData.name !== undefined) prismaUpdateData.name = hostelData.name;
+    if (hostelData.address !== undefined) prismaUpdateData.address = hostelData.address;
+    if (hostelData.description !== undefined) prismaUpdateData.description = hostelData.description || null;
+    if (hostelData.total_rooms !== undefined) prismaUpdateData.totalRooms = hostelData.total_rooms;
+    if (hostelData.available_rooms !== undefined) prismaUpdateData.availableRooms = hostelData.available_rooms;
+    if (hostelData.contact_phone !== undefined) prismaUpdateData.contactPhone = hostelData.contact_phone || null;
+    if (hostelData.contact_email !== undefined) prismaUpdateData.contactEmail = hostelData.contact_email || null;
+    if (hostelData.status !== undefined) prismaUpdateData.status = hostelData.status as PrismaHostel['status'];
+    if (hostelData.university_id !== undefined) {
+      if (hostelData.university_id) {
+        prismaUpdateData.university = { connect: { id: hostelData.university_id } };
+      } else {
+        prismaUpdateData.university = { disconnect: true };
+      }
+    }
+    if (hostelData.region_id !== undefined) {
+      if (hostelData.region_id) {
+        prismaUpdateData.region = { connect: { id: hostelData.region_id } };
+      } else {
+        prismaUpdateData.region = { disconnect: true };
+      }
+    }
+    if (hostelData.occupancy_type !== undefined) prismaUpdateData.occupancyType = hostelData.occupancy_type || null;
+
+    const prismaHostel = await prisma.hostel.update({
+      where: { id },
+      data: prismaUpdateData,
+    });
+
+    return prismaHostelToHostel(prismaHostel);
   }
 
   static async delete(id: number): Promise<boolean> {
-    const query = 'DELETE FROM hostels WHERE id = $1';
-    const result = await pool.query(query, [id]);
-    return (result.rowCount || 0) > 0;
+    const result = await prisma.hostel.delete({
+      where: { id },
+    });
+
+    return !!result;
   }
 
-  static async getHostelStats(): Promise<{ total_hostels: number; active_hostels: number; total_rooms: number; available_rooms: number }> {
-    const query = `
-      WITH active_assignments AS (
-        SELECT 
-          r.hostel_id,
-          COUNT(DISTINCT sra.id) as occupied_rooms_count
-        FROM student_room_assignments sra
-        JOIN rooms r ON sra.room_id = r.id
-        WHERE sra.status = 'active'
-        GROUP BY r.hostel_id
-      )
-      SELECT 
-        COUNT(*) as total_hostels,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_hostels,
-        SUM(total_rooms) as total_rooms,
-        SUM(total_rooms - COALESCE(aa.occupied_rooms_count, 0)) as available_rooms
-      FROM hostels h
-      LEFT JOIN active_assignments aa ON aa.hostel_id = h.id
-    `;
-    
-    const result = await pool.query(query);
-    return result.rows[0];
+  static async getHostelStats(): Promise<{
+    total_hostels: number;
+    active_hostels: number;
+    total_rooms: number;
+    available_rooms: number;
+  }> {
+    // Use Prisma's aggregate and raw query for complex stats
+    const [totalStats, activeAssignments] = await Promise.all([
+      prisma.hostel.aggregate({
+        _count: {
+          id: true,
+        },
+        _sum: {
+          totalRooms: true,
+        },
+        where: {
+          status: 'active',
+        },
+      }),
+      prisma.studentRoomAssignment.groupBy({
+        by: ['roomId'],
+        where: {
+          status: 'active',
+        },
+        _count: {
+          id: true,
+        },
+      }),
+    ]);
+
+    const occupiedRoomsCount = activeAssignments.length;
+    const totalHostels = await prisma.hostel.count();
+    const activeHostels = await prisma.hostel.count({
+      where: { status: 'active' },
+    });
+    const totalRooms = totalStats._sum.totalRooms || 0;
+    const availableRooms = totalRooms - occupiedRoomsCount;
+
+    return {
+      total_hostels: totalHostels,
+      active_hostels: activeHostels,
+      total_rooms: totalRooms,
+      available_rooms: availableRooms,
+    };
   }
 }

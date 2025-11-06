@@ -1,14 +1,15 @@
-import pool from '../config/database';
+import prisma from '../lib/prisma';
+import { University as PrismaUniversity, Prisma } from '@prisma/client';
 
 export interface University {
   id: number;
   name: string;
   code: string;
-  region_id?: number;
-  address?: string;
-  contact_phone?: string;
-  contact_email?: string;
-  website?: string;
+  region_id?: number | null;
+  address?: string | null;
+  contact_phone?: string | null;
+  contact_email?: string | null;
+  website?: string | null;
   status: 'active' | 'inactive' | 'suspended';
   created_at: Date;
   updated_at: Date;
@@ -43,130 +44,169 @@ export interface Region {
   created_at: Date;
 }
 
+// Helper function to convert Prisma University to our University interface
+function prismaUniversityToUniversity(prismaUni: PrismaUniversity & { region?: { name: string } | null }): University & { region_name?: string } {
+  return {
+    id: prismaUni.id,
+    name: prismaUni.name,
+    code: prismaUni.code || '',
+    region_id: prismaUni.regionId,
+    address: prismaUni.address,
+    contact_phone: prismaUni.contactPhone,
+    contact_email: prismaUni.contactEmail,
+    website: prismaUni.website,
+    status: prismaUni.status as University['status'],
+    created_at: prismaUni.createdAt,
+    updated_at: prismaUni.updatedAt,
+    region_name: prismaUni.region?.name,
+  };
+}
+
 export class UniversityModel {
   static async create(data: CreateUniversityData): Promise<University> {
-    const query = `
-      INSERT INTO universities (name, code, region_id, address, contact_phone, contact_email, website, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `;
-    const values = [
-      data.name,
-      data.code,
-      data.region_id || null,
-      data.address || null,
-      data.contact_phone || null,
-      data.contact_email || null,
-      data.website || null,
-      data.status || 'active'
-    ];
-
-    const result = await pool.query(query, values);
-    return result.rows[0];
+    const prismaUni = await prisma.university.create({
+      data: {
+        name: data.name,
+        code: data.code || null,
+        regionId: data.region_id || null,
+        address: data.address || null,
+        contactPhone: data.contact_phone || null,
+        contactEmail: data.contact_email || null,
+        website: data.website || null,
+        status: (data.status || 'active') as PrismaUniversity['status'],
+      },
+    });
+    
+    return prismaUniversityToUniversity(prismaUni);
   }
 
-  static async findAll(): Promise<University[]> {
-    const query = `
-      SELECT u.*, r.name as region_name
-      FROM universities u
-      LEFT JOIN regions r ON u.region_id = r.id
-      ORDER BY u.name
-    `;
-    const result = await pool.query(query);
-    return result.rows;
+  static async findAll(): Promise<(University & { region_name?: string })[]> {
+    const prismaUnis = await prisma.university.findMany({
+      include: {
+        region: true,
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
+    
+    return prismaUnis.map(prismaUniversityToUniversity);
   }
 
-  static async findById(id: number): Promise<University | null> {
-    const query = `
-      SELECT u.*, r.name as region_name
-      FROM universities u
-      LEFT JOIN regions r ON u.region_id = r.id
-      WHERE u.id = $1
-    `;
-    const result = await pool.query(query, [id]);
-    return result.rows[0] || null;
+  static async findById(id: number): Promise<(University & { region_name?: string }) | null> {
+    const prismaUni = await prisma.university.findUnique({
+      where: { id },
+      include: {
+        region: true,
+      },
+    });
+    
+    return prismaUni ? prismaUniversityToUniversity(prismaUni) : null;
   }
 
   static async update(id: number, data: UpdateUniversityData): Promise<University | null> {
-    const fields = [];
-    const values = [];
-    let paramCount = 1;
-
-    Object.entries(data).forEach(([key, value]) => {
-      if (value !== undefined) {
-        fields.push(`${key} = $${paramCount}`);
-        values.push(value);
-        paramCount++;
+    const prismaUpdateData: Prisma.UniversityUpdateInput = {};
+    
+    if (data.name !== undefined) prismaUpdateData.name = data.name;
+    if (data.code !== undefined) prismaUpdateData.code = data.code || null;
+    if (data.status !== undefined) prismaUpdateData.status = data.status as PrismaUniversity['status'];
+    if (data.address !== undefined) prismaUpdateData.address = data.address || null;
+    if (data.contact_phone !== undefined) prismaUpdateData.contactPhone = data.contact_phone || null;
+    if (data.contact_email !== undefined) prismaUpdateData.contactEmail = data.contact_email || null;
+    if (data.website !== undefined) prismaUpdateData.website = data.website || null;
+    if (data.region_id !== undefined) {
+      if (data.region_id) {
+        prismaUpdateData.region = { connect: { id: data.region_id } };
+      } else {
+        prismaUpdateData.region = { disconnect: true };
       }
-    });
+    }
 
-    if (fields.length === 0) {
+    if (Object.keys(prismaUpdateData).length === 0) {
       return this.findById(id);
     }
 
-    fields.push(`updated_at = CURRENT_TIMESTAMP`);
-    values.push(id);
-
-    const query = `
-      UPDATE universities 
-      SET ${fields.join(', ')}
-      WHERE id = $${paramCount}
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, values);
-    return result.rows[0] || null;
+    const prismaUni = await prisma.university.update({
+      where: { id },
+      data: prismaUpdateData,
+    });
+    
+    return prismaUniversityToUniversity(prismaUni);
   }
 
   static async delete(id: number): Promise<boolean> {
-    const query = 'DELETE FROM universities WHERE id = $1';
-    const result = await pool.query(query, [id]);
-    return (result.rowCount || 0) > 0;
+    try {
+      await prisma.university.delete({
+        where: { id },
+      });
+      return true;
+    } catch (error: any) {
+      if (error.code === 'P2025') return false; // Record not found
+      throw error;
+    }
   }
 
   static async getRegions(): Promise<Region[]> {
-    const query = 'SELECT * FROM regions ORDER BY name';
-    const result = await pool.query(query);
-    return result.rows;
+    const regions = await prisma.region.findMany({
+      orderBy: {
+        name: 'asc',
+      },
+    });
+    
+    return regions.map(region => ({
+      id: region.id,
+      name: region.name,
+      country: region.country,
+      created_at: region.createdAt,
+    }));
   }
 
   static async getUniversityStats(universityId?: number): Promise<any> {
-    let whereClause = '';
-    let params: any[] = [];
+    // For complex aggregations, use Prisma's query builder or raw query
+    const whereClause = universityId ? { universityId } : {};
+    
+    // Get hostels
+    const hostels = await prisma.hostel.findMany({
+      where: whereClause,
+      include: {
+        users: {
+          where: { role: 'user' },
+        },
+        rooms: true,
+      },
+    });
 
-    if (universityId) {
-      whereClause = 'WHERE h.university_id = $1';
-      params = [universityId];
-    }
+    // Get active room assignments
+    const activeAssignments = await prisma.studentRoomAssignment.groupBy({
+      by: ['roomId'],
+      where: {
+        status: 'active',
+        room: {
+          hostel: whereClause,
+        },
+      },
+      _count: {
+        id: true,
+      },
+    });
 
-    const query = `
-      WITH active_assignments AS (
-        SELECT 
-          r.hostel_id,
-          COUNT(DISTINCT sra.id) as occupied_rooms_count
-        FROM student_room_assignments sra
-        JOIN rooms r ON sra.room_id = r.id
-        WHERE sra.status = 'active'
-        GROUP BY r.hostel_id
-      )
-      SELECT 
-        COUNT(DISTINCT h.id) as total_hostels,
-        COUNT(DISTINCT u.id) as total_students,
-        SUM(h.total_rooms) as total_rooms,
-        SUM(h.total_rooms - COALESCE(aa.occupied_rooms_count, 0)) as available_rooms,
-        SUM(COALESCE(aa.occupied_rooms_count, 0)) as occupied_rooms,
-        CASE 
-          WHEN SUM(h.total_rooms) > 0 THEN 
-            ROUND((SUM(COALESCE(aa.occupied_rooms_count, 0))::numeric / SUM(h.total_rooms)::numeric) * 100, 2)
-          ELSE 0 
-        END as occupancy_rate
-      FROM hostels h
-      LEFT JOIN users u ON u.hostel_id = h.id AND u.role = 'user'
-      LEFT JOIN active_assignments aa ON aa.hostel_id = h.id
-      ${whereClause}
-    `;
+    const occupiedRoomsCount = activeAssignments.length;
+    const totalHostels = hostels.length;
+    const totalStudents = hostels.reduce((sum, h) => sum + h.users.length, 0);
+    const totalRooms = hostels.reduce((sum, h) => sum + h.totalRooms, 0);
+    const availableRooms = totalRooms - occupiedRoomsCount;
+    const occupiedRooms = occupiedRoomsCount;
+    const occupancyRate = totalRooms > 0 
+      ? Math.round((occupiedRooms / totalRooms) * 100 * 100) / 100 
+      : 0;
 
-    const result = await pool.query(query, params);
-    return result.rows[0];
+    return {
+      total_hostels: totalHostels,
+      total_students: totalStudents,
+      total_rooms: totalRooms,
+      available_rooms: availableRooms,
+      occupied_rooms: occupiedRooms,
+      occupancy_rate: occupancyRate,
+    };
   }
 }

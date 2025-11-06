@@ -9,6 +9,11 @@
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate": "ts-node src/database/migrations.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "prisma:seed": "ts-node prisma/seed.ts",
     "setup:super-admin": "ts-node src/database/setup-super-admin.ts",
     "deploy": "bash scripts/deploy.sh",
     "sync-db": "bash scripts/sync-database.sh",
@@ -25,6 +30,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@prisma/client": "^6.19.0",
     "@types/multer": "^2.0.0",
     "@types/nodemailer": "^7.0.1",
     "@types/qrcode": "^1.5.5",
@@ -43,6 +49,7 @@
     "node-fetch": "^2.7.0",
     "nodemailer": "^7.0.6",
     "pg": "^8.11.3",
+    "prisma": "^6.19.0",
     "qrcode": "^1.5.4",
     "speakeasy": "^2.0.0",
     "zod": "^4.1.11"

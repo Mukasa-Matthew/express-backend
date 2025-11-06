@@ -1,0 +1,506 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Regions table (must be first due to foreign key dependencies)
+model Region {
+  id        Int         @id @default(autoincrement())
+  name      String      @unique @db.VarChar(100)
+  country   String      @default("Uganda") @db.VarChar(100)
+  createdAt DateTime    @default(now()) @map("created_at")
+  
+  universities University[]
+  hostels      Hostel[]
+  
+  @@map("regions")
+}
+
+// Universities table
+model University {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.VarChar(200)
+  code         String?  @unique @db.VarChar(20)
+  regionId     Int?     @map("region_id")
+  address      String?  @db.Text
+  contactPhone String?  @map("contact_phone") @db.VarChar(20)
+  contactEmail String?  @map("contact_email") @db.VarChar(100)
+  website      String?  @db.VarChar(200)
+  status       String   @default("active") @db.VarChar(20)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  
+  region   Region?  @relation(fields: [regionId], references: [id])
+  hostels  Hostel[]
+  users    User[]
+  
+  @@map("universities")
+}
+
+// Hostels table
+model Hostel {
+  id                    Int       @id @default(autoincrement())
+  name                  String    @db.VarChar(255)
+  address               String    @db.Text
+  description           String?   @db.Text
+  totalRooms            Int       @default(0) @map("total_rooms")
+  availableRooms        Int       @default(0) @map("available_rooms")
+  contactPhone          String?   @map("contact_phone") @db.VarChar(20)
+  contactEmail          String?   @map("contact_email") @db.VarChar(255)
+  status                String    @default("active") @db.VarChar(50)
+  universityId          Int?      @map("university_id")
+  regionId              Int?      @map("region_id")
+  pricePerRoom          Int?      @map("price_per_room")
+  occupancyType         String?   @map("occupancy_type") @db.VarChar(10)
+  distanceFromCampus    Decimal?  @map("distance_from_campus") @db.Decimal(5, 2)
+  amenities             String?   @db.Text
+  rulesAndRegulations   String?   @map("rules_and_regulations") @db.Text
+  isPublished           Boolean   @default(false) @map("is_published")
+  latitude              Decimal?  @db.Decimal(10, 8)
+  longitude             Decimal?  @db.Decimal(11, 8)
+  currentSubscriptionId Int?      @map("current_subscription_id")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  
+  university      University?            @relation(fields: [universityId], references: [id])
+  region          Region?               @relation(fields: [regionId], references: [id])
+  users           User[]
+  rooms           Room[]
+  custodians      Custodian[]
+  expenses        Expense[]
+  inventoryItems  Inventory[]
+  subscriptions   HostelSubscription[]
+  semesters       Semester[]
+  images          HostelImage[]
+  currentSubscription HostelSubscription? @relation("HostelCurrentSubscription", fields: [currentSubscriptionId], references: [id])
+  
+  @@index([isPublished], map: "idx_hostels_is_published")
+  @@index([currentSubscriptionId], map: "idx_hostels_current_subscription_id")
+  @@map("hostels")
+}
+
+// Users table
+model User {
+  id            Int       @id @default(autoincrement())
+  email         String    @unique @db.VarChar(255)
+  username      String?   @unique @db.VarChar(100)
+  name          String    @db.VarChar(255)
+  password      String    @db.VarChar(255)
+  role          String    @db.VarChar(50)
+  hostelId      Int?      @map("hostel_id")
+  universityId  Int?      @map("university_id")
+  profilePicture String?  @map("profile_picture") @db.VarChar(500)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  
+  hostel        Hostel?       @relation(fields: [hostelId], references: [id], onDelete: SetNull)
+  university    University?   @relation(fields: [universityId], references: [id])
+  student       Student?
+  custodians    Custodian[]
+  roomAssignments StudentRoomAssignment[] @relation("StudentAssignments")
+  assignedBy    StudentRoomAssignment[]    @relation("AssignedBy")
+  payments      Payment[]
+  expenses      Expense[]
+  auditLogs     AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+  semesterEnrollments SemesterEnrollment[]
+  twoFactor     UserTwoFactor?
+  recordedPayments Payment[] @relation("PaymentRecorder")
+  
+  @@index([email], map: "idx_users_email")
+  @@index([username], map: "idx_users_username")
+  @@map("users")
+}
+
+// Rooms table
+model Room {
+  id              Int       @id @default(autoincrement())
+  hostelId        Int       @map("hostel_id")
+  roomNumber      String    @map("room_number") @db.VarChar(50)
+  floor           Int       @default(1)
+  capacity        Int       @default(1)
+  currentOccupants Int      @default(0) @map("current_occupants")
+  price           Decimal   @db.Decimal(10, 2)
+  amenities       String?   @db.Text
+  status          String    @default("available") @db.VarChar(50)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  hostel          Hostel                  @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  assignments     StudentRoomAssignment[]
+  semesterEnrollments SemesterEnrollment[]
+  
+  @@unique([hostelId, roomNumber])
+  @@map("rooms")
+}
+
+// Students table
+model Student {
+  id              Int       @id @default(autoincrement())
+  userId          Int       @unique @map("user_id")
+  registrationNumber String @unique @map("registration_number") @db.VarChar(100)
+  accessNumber    String?   @unique @map("access_number") @db.VarChar(100)
+  course          String?   @db.VarChar(255)
+  yearOfStudy     Int?      @map("year_of_study")
+  phoneNumber     String?   @map("phone_number") @db.VarChar(20)
+  guardianName    String?   @map("guardian_name") @db.VarChar(255)
+  guardianPhone   String?   @map("guardian_phone") @db.VarChar(20)
+  emergencyContact String?  @map("emergency_contact") @db.VarChar(20)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("students")
+}
+
+// Custodians table
+model Custodian {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  hostelId  Int       @map("hostel_id")
+  status    String    @default("active") @db.VarChar(50)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hostel    Hostel @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, hostelId])
+  @@map("custodians")
+}
+
+// Global Semesters table
+model GlobalSemester {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.VarChar(100)
+  description String?   @db.Text
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  semesters   Semester[]
+  
+  @@map("global_semesters")
+}
+
+// Semesters table
+model Semester {
+  id              Int       @id @default(autoincrement())
+  hostelId        Int       @map("hostel_id")
+  globalSemesterId Int?     @map("global_semester_id")
+  name            String    @db.VarChar(100)
+  academicYear    String    @map("academic_year") @db.VarChar(20)
+  startDate       DateTime  @map("start_date") @db.Date
+  endDate         DateTime  @map("end_date") @db.Date
+  isCurrent       Boolean   @default(false) @map("is_current")
+  status          String    @default("upcoming") @db.VarChar(50)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  hostel          Hostel              @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  globalSemester  GlobalSemester?     @relation(fields: [globalSemesterId], references: [id])
+  enrollments     SemesterEnrollment[]
+  assignments     StudentRoomAssignment[]
+  payments        Payment[]
+  
+  @@map("semesters")
+}
+
+// Semester Enrollments table
+model SemesterEnrollment {
+  id              Int       @id @default(autoincrement())
+  userId          Int       @map("user_id")
+  semesterId      Int       @map("semester_id")
+  roomId          Int?      @map("room_id")
+  enrollmentStatus String   @default("active") @map("enrollment_status") @db.VarChar(50)
+  enrollmentDate  DateTime  @default(now()) @map("enrollment_date")
+  completedAt     DateTime? @map("completed_at")
+  totalAmount     Decimal   @default(0) @map("total_amount") @db.Decimal(10, 2)
+  amountPaid      Decimal   @default(0) @map("amount_paid") @db.Decimal(10, 2)
+  balance         Decimal   @default(0) @db.Decimal(10, 2)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  semester        Semester  @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+  room            Room?     @relation(fields: [roomId], references: [id])
+  
+  @@unique([userId, semesterId])
+  @@map("semester_enrollments")
+}
+
+// Student Room Assignments table
+model StudentRoomAssignment {
+  id            Int       @id @default(autoincrement())
+  studentId     Int       @map("student_id")
+  roomId        Int       @map("room_id")
+  semesterId    Int?      @map("semester_id")
+  assignedBy    Int?      @map("assigned_by")
+  assignmentDate DateTime @default(now()) @map("assignment_date") @db.Date
+  checkoutDate  DateTime? @map("checkout_date") @db.Date
+  status        String    @default("active") @db.VarChar(50)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  
+  student       User      @relation("StudentAssignments", fields: [studentId], references: [id], onDelete: Cascade)
+  room          Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  semester      Semester? @relation(fields: [semesterId], references: [id])
+  assignedByUser User?    @relation("AssignedBy", fields: [assignedBy], references: [id])
+  
+  @@map("student_room_assignments")
+}
+
+// Payments table
+model Payment {
+  id            Int       @id @default(autoincrement())
+  studentId     Int       @map("student_id")
+  semesterId    Int?      @map("semester_id")
+  amount        Decimal   @db.Decimal(10, 2)
+  paymentMethod String    @default("cash") @map("payment_method") @db.VarChar(50)
+  paymentDate   DateTime  @default(now()) @map("payment_date")
+  transactionId String?   @map("transaction_id") @db.VarChar(255)
+  currency      String    @default("UGX") @db.VarChar(10)
+  recordedBy    Int?      @map("recorded_by")
+  notes         String?   @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  
+  student       User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  semester      Semester? @relation(fields: [semesterId], references: [id])
+  recorder      User?     @relation("PaymentRecorder", fields: [recordedBy], references: [id])
+  
+  @@map("payments")
+}
+
+// Expenses table
+model Expense {
+  id          Int       @id @default(autoincrement())
+  hostelId    Int       @map("hostel_id")
+  category    String    @db.VarChar(100)
+  amount      Decimal   @db.Decimal(10, 2)
+  description String?   @db.Text
+  expenseDate DateTime  @default(now()) @map("expense_date") @db.Date
+  paidBy      Int?      @map("paid_by")
+  receiptUrl  String?   @map("receipt_url") @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  hostel      Hostel    @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  payer       User?     @relation(fields: [paidBy], references: [id])
+  
+  @@map("expenses")
+}
+
+// Inventory table
+model Inventory {
+  id          Int       @id @default(autoincrement())
+  hostelId    Int       @map("hostel_id")
+  itemName    String    @map("item_name") @db.VarChar(255)
+  category    String    @db.VarChar(100)
+  quantity    Int       @default(0)
+  unit        String    @default("pieces") @db.VarChar(50)
+  condition   String    @default("good") @db.VarChar(50)
+  location    String?   @db.VarChar(255)
+  notes       String?   @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  hostel      Hostel    @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  
+  @@map("inventory")
+}
+
+// Subscription Plans table
+model SubscriptionPlan {
+  id            Int       @id @default(autoincrement())
+  name          String    @db.VarChar(100)
+  description   String?   @db.Text
+  price         Decimal?  @db.Decimal(10, 2)
+  pricePerMonth Decimal?  @map("price_per_month") @db.Decimal(10, 2)
+  totalPrice    Decimal?  @map("total_price") @db.Decimal(10, 2)
+  durationMonths Int      @default(1) @map("duration_months")
+  features      Json      @default("[]")
+  status        String    @default("active") @db.VarChar(50)
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  
+  subscriptions HostelSubscription[]
+  
+  @@map("subscription_plans")
+}
+
+// Hostel Subscriptions table
+model HostelSubscription {
+  id              Int       @id @default(autoincrement())
+  hostelId        Int       @map("hostel_id")
+  planId           Int       @map("plan_id")
+  startDate        DateTime  @default(now()) @map("start_date") @db.Date
+  endDate          DateTime  @map("end_date") @db.Date
+  amountPaid      Decimal   @default(0) @map("amount_paid") @db.Decimal(10, 2)
+  status           String    @default("active") @db.VarChar(50)
+  paymentMethod    String?   @map("payment_method") @db.VarChar(50)
+  paymentReference String?   @map("payment_reference") @db.VarChar(100)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  
+  hostel           Hostel            @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  plan             SubscriptionPlan  @relation(fields: [planId], references: [id])
+  currentHostels   Hostel[]          @relation("HostelCurrentSubscription")
+  
+  @@map("hostel_subscriptions")
+}
+
+// Hostel Images table
+model HostelImage {
+  id           Int       @id @default(autoincrement())
+  hostelId     Int       @map("hostel_id")
+  imageUrl     String    @map("image_url") @db.VarChar(500)
+  caption      String?   @db.VarChar(255)
+  isPrimary    Boolean   @default(false) @map("is_primary")
+  displayOrder Int       @default(0) @map("display_order")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  
+  hostel       Hostel    @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  
+  @@index([hostelId], map: "idx_hostel_images_hostel_id")
+  @@map("hostel_images")
+}
+
+// Audit Logs table
+model AuditLog {
+  id          Int       @id @default(autoincrement())
+  userId      Int?      @map("user_id")
+  action      String    @db.VarChar(100)
+  entityType  String?   @map("entity_type") @db.VarChar(50)
+  entityId    Int?      @map("entity_id")
+  changes     Json?
+  ipAddress   String?   @map("ip_address") @db.VarChar(45)
+  userAgent   String?   @map("user_agent") @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  
+  user        User?     @relation(fields: [userId], references: [id])
+  
+  @@map("audit_logs")
+}
+
+// Password Reset Tokens table
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  token     String    @unique @db.VarChar(255)
+  expiresAt DateTime  @map("expires_at")
+  used      Boolean   @default(false)
+  createdAt DateTime  @default(now()) @map("created_at")
+  
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("password_reset_tokens")
+}
+
+// Auth Settings table
+model AuthSetting {
+  id          Int       @id @default(autoincrement())
+  settingKey  String    @unique @map("setting_key") @db.VarChar(100)
+  settingValue String   @map("setting_value") @db.Text
+  settingType String    @map("setting_type") @db.VarChar(20)
+  description String?   @db.Text
+  isEncrypted Boolean   @default(false) @map("is_encrypted")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  @@map("auth_settings")
+}
+
+// Password Rules table
+model PasswordRule {
+  id                    Int       @id @default(autoincrement())
+  ruleName              String    @unique @map("rule_name") @db.VarChar(100)
+  isEnabled             Boolean   @default(true) @map("is_enabled")
+  minLength             Int       @default(8) @map("min_length")
+  maxLength             Int       @default(128) @map("max_length")
+  requireUppercase      Boolean   @default(false) @map("require_uppercase")
+  requireLowercase      Boolean   @default(false) @map("require_lowercase")
+  requireNumbers         Boolean   @default(false) @map("require_numbers")
+  requireSpecialChars    Boolean   @default(false) @map("require_special_chars")
+  specialChars          String    @default("!@#$%^&*()_+-=[]{}|;:,.<>?") @map("special_chars") @db.Text
+  preventCommonPasswords Boolean   @default(true) @map("prevent_common_passwords")
+  preventUserInfo       Boolean   @default(true) @map("prevent_user_info")
+  maxAgeDays            Int?      @map("max_age_days")
+  historyCount           Int       @default(5) @map("history_count")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+  
+  @@map("password_rules")
+}
+
+// Two Factor Settings table
+model TwoFactorSetting {
+  id                    Int       @id @default(autoincrement())
+  isEnabled             Boolean   @default(false) @map("is_enabled")
+  method                String    @default("totp") @db.VarChar(20)
+  issuerName            String    @default("LTS Portal") @map("issuer_name") @db.VarChar(100)
+  backupCodesCount      Int       @default(10) @map("backup_codes_count")
+  sessionTimeoutMinutes Int       @default(30) @map("session_timeout_minutes")
+  require2faForAdmin    Boolean   @default(false) @map("require_2fa_for_admin")
+  require2faForUsers     Boolean   @default(false) @map("require_2fa_for_users")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  
+  @@map("two_factor_settings")
+}
+
+// User Two Factor table
+model UserTwoFactor {
+  id          Int       @id @default(autoincrement())
+  userId      Int       @unique @map("user_id")
+  isEnabled   Boolean   @default(false) @map("is_enabled")
+  secretKey   String?   @map("secret_key") @db.VarChar(255)
+  backupCodes Json?     @map("backup_codes")
+  lastUsed    DateTime? @map("last_used")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("user_two_factor")
+}
+
+// SSO Providers table
+model SSOProvider {
+  id              Int       @id @default(autoincrement())
+  name            String    @db.VarChar(100)
+  providerType    String    @map("provider_type") @db.VarChar(20)
+  isEnabled       Boolean   @default(false) @map("is_enabled")
+  clientId        String?   @map("client_id") @db.VarChar(255)
+  clientSecret    String?   @map("client_secret") @db.VarChar(255)
+  authorizationUrl String?  @map("authorization_url") @db.VarChar(500)
+  tokenUrl        String?   @map("token_url") @db.VarChar(500)
+  userInfoUrl     String?   @map("user_info_url") @db.VarChar(500)
+  redirectUri     String?   @map("redirect_uri") @db.VarChar(500)
+  scopes          String?   @db.Text
+  additionalConfig Json?    @map("additional_config")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  @@map("sso_providers")
+}
+
+// Password History table
+model PasswordHistory {
+  id          Int       @id @default(autoincrement())
+  userId      Int       @map("user_id")
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  
+  @@map("password_history")
+}
