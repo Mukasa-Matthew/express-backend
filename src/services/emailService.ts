@@ -35,6 +35,11 @@ export class EmailService {
         // Do not fail on invalid certificates
         rejectUnauthorized: false,
       },
+      pool: true, // Use connection pooling for better performance
+      maxConnections: 5, // Maximum number of connections in the pool
+      maxMessages: 100, // Maximum number of messages per connection
+      rateDelta: 1000, // Time window for rate limiting
+      rateLimit: 14, // Max 14 emails per second (Gmail limit is 20)
     });
   }
 
@@ -66,15 +71,7 @@ export class EmailService {
         this.initialize();
       }
 
-      // Verify connection before sending (only log, don't fail)
-      try {
-        await this.transporter.verify();
-      } catch (verifyError: any) {
-        console.warn('⚠️ Email connection verification failed, attempting to send anyway:', verifyError.message);
-        // Reinitialize transporter in case of connection issues
-        this.initialize();
-      }
-
+      // Skip verification to speed up email sending - connection will be verified on first send
       const mailOptions = {
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: options.to,
@@ -94,10 +91,29 @@ export class EmailService {
       if (error.response) {
         console.error('   SMTP response:', error.response);
       }
+      
+      // Try to reinitialize transporter on error
+      try {
+        this.initialize();
+      } catch (initError) {
+        // Ignore initialization errors
+      }
+      
       console.log('📧 Falling back to console logging...');
       this.logCredentialsToConsole(options);
       return true; // Return true to not break the flow
     }
+  }
+
+  /**
+   * Send email asynchronously without blocking the main thread
+   * Use this for non-critical emails that shouldn't delay API responses
+   */
+  static sendEmailAsync(options: EmailOptions): void {
+    // Fire and forget - don't await
+    this.sendEmail(options).catch((error) => {
+      console.error('📧 Async email sending failed:', error.message);
+    });
   }
 
   static logCredentialsToConsole(options: EmailOptions) {

@@ -281,29 +281,30 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Start transaction
+    // Start transaction and hash password in parallel for better performance
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
+      // Hash password in parallel with other operations
+      const [hostelData, hashedPassword] = await Promise.all([
+        Promise.resolve({
+          name,
+          address,
+          description,
+          total_rooms,
+          available_rooms: available_rooms || total_rooms,
+          contact_phone,
+          contact_email,
+          status: status || 'active',
+          university_id,
+          occupancy_type
+        }),
+        bcrypt.hash(temporaryPassword, 10)
+      ]);
+
       // Create hostel
-      const hostelData = {
-        name,
-        address,
-        description,
-        total_rooms,
-        available_rooms: available_rooms || total_rooms,
-        contact_phone,
-        contact_email,
-        status: status || 'active',
-        university_id,
-        occupancy_type
-      };
-
       const hostel = await HostelModel.create(hostelData);
-
-      // Hash temporary password
-      const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
 
       // Create hostel admin user
       const adminData = {
@@ -360,45 +361,10 @@ router.post('/', async (req, res) => {
 
       await client.query('COMMIT');
 
-      // Send welcome email with temporary credentials
-      try {
-        const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-        const emailHtml = EmailService.generateHostelAdminWelcomeEmail(
-          admin_name,
-          admin_email,
-          temporaryUsername,
-          temporaryPassword,
-          hostel.name,
-          loginUrl,
-          {
-            planName: plan.name,
-            startDate: startDate,
-            endDate: endDate,
-            durationMonths: durationMonths,
-            pricePerMonth: parseFloat(plan.price_per_month || 0),
-            totalPrice: parseFloat(plan.total_price || 0),
-            amountPaid: 0,
-            paymentReference: subscription.payment_reference
-          }
-        );
-
-        const emailSent = await EmailService.sendEmail({
-          to: admin_email,
-          subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
-          html: emailHtml
-        });
-
-        if (!emailSent) {
-          console.warn('Failed to send welcome email to hostel admin');
-        }
-      } catch (emailError) {
-        console.error('Error sending welcome email:', emailError);
-        // Don't fail the request if email fails
-      }
-
+      // Send response immediately - don't wait for email
       res.status(201).json({
         success: true,
-        message: 'Hostel and admin created successfully. Welcome email sent to admin.',
+        message: 'Hostel and admin created successfully. Welcome email will be sent shortly.',
         data: {
           hostel,
           admin: {
@@ -408,6 +374,65 @@ router.post('/', async (req, res) => {
             role: admin.role,
             hostel_id: hostel.id
           }
+        }
+      });
+
+      // Send welcome email asynchronously (non-blocking)
+      // This runs in the background and won't delay the API response
+      setImmediate(async () => {
+        try {
+          const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
+          const emailHtml = EmailService.generateHostelAdminWelcomeEmail(
+            admin_name,
+            admin_email,
+            temporaryUsername,
+            temporaryPassword,
+            hostel.name,
+            loginUrl,
+            {
+              planName: plan.name,
+              startDate: startDate,
+              endDate: endDate,
+              durationMonths: durationMonths,
+              pricePerMonth: parseFloat(plan.price_per_month || 0),
+              totalPrice: parseFloat(plan.total_price || 0),
+              amountPaid: 0,
+              paymentReference: subscription.payment_reference
+            }
+          );
+
+          await EmailService.sendEmail({
+            to: admin_email,
+            subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
+            html: emailHtml
+          });
+
+          console.log(`✅ Welcome email sent to ${admin_email}`);
+        } catch (emailError: any) {
+          console.error('Error sending welcome email:', emailError.message);
+          // Log credentials to console as fallback
+          EmailService.logCredentialsToConsole({
+            to: admin_email,
+            subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
+            html: EmailService.generateHostelAdminWelcomeEmail(
+              admin_name,
+              admin_email,
+              temporaryUsername,
+              temporaryPassword,
+              hostel.name,
+              `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`,
+              {
+                planName: plan.name,
+                startDate: startDate,
+                endDate: endDate,
+                durationMonths: durationMonths,
+                pricePerMonth: parseFloat(plan.price_per_month || 0),
+                totalPrice: parseFloat(plan.total_price || 0),
+                amountPaid: 0,
+                paymentReference: subscription.payment_reference
+              }
+            )
+          });
         }
       });
 

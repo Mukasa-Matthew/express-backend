@@ -203,10 +203,14 @@ async function startServer() {
     process.exit(1);
   }
 
-  // Initialize email service
+  // Initialize email service (non-blocking)
   if (process.env.SMTP_USER && process.env.SMTP_PASS) {
     console.log('📧 Initializing email service...');
-    await EmailService.verifyConnection();
+    EmailService.initialize(); // Initialize immediately for faster email sending
+    // Verify connection in background (non-blocking)
+    EmailService.verifyConnection().catch((err) => {
+      console.warn('⚠️  Email service verification failed (will retry on first send):', err.message);
+    });
   } else {
     console.log('⚠️  Email service not configured (SMTP_USER or SMTP_PASS not set)');
     console.log('   Emails will be logged to console instead');

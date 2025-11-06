@@ -68,6 +68,8 @@ export async function initializeDatabase(): Promise<void> {
     
     // Only setup super admin if tables exist
     if (tablesExist) {
+      // Ensure database schema matches Prisma schema
+      await ensureSchemaMatches();
       await setupSuperAdmin();
     }
     
@@ -228,6 +230,111 @@ async function markPrismaMigrationAsApplied(): Promise<void> {
     if (error.code !== '23505') {
       console.warn('⚠️  Could not mark migration as applied:', error.message);
     }
+  }
+}
+
+/**
+ * Ensure database schema matches Prisma schema by adding missing columns
+ */
+async function ensureSchemaMatches(): Promise<void> {
+  try {
+    console.log('🔍 Checking database schema compatibility...');
+    
+    // Check if university_id column exists in users table
+    const checkColumnQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      AND table_name = 'users' 
+      AND column_name = 'university_id'
+    `;
+    
+    const result = await tempPool.query(checkColumnQuery);
+    
+    if (result.rows.length === 0) {
+      console.log('📝 Adding missing university_id column to users table...');
+      
+      // Check if universities table exists first
+      const universitiesTableCheck = await tempPool.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_schema = 'public' 
+          AND table_name = 'universities'
+        )
+      `);
+      
+      if (universitiesTableCheck.rows[0]?.exists) {
+        // Add university_id column with foreign key
+        await tempPool.query(`
+          ALTER TABLE users 
+          ADD COLUMN IF NOT EXISTS university_id INTEGER REFERENCES universities(id)
+        `);
+        console.log('✅ Added university_id column to users table');
+      } else {
+        // Add university_id column without foreign key (universities table doesn't exist yet)
+        await tempPool.query(`
+          ALTER TABLE users 
+          ADD COLUMN IF NOT EXISTS university_id INTEGER
+        `);
+        console.log('✅ Added university_id column to users table (without foreign key)');
+      }
+    } else {
+      console.log('✅ university_id column already exists');
+    }
+    
+    // Check for other potentially missing columns
+    // Check username column
+    const usernameCheck = await tempPool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      AND table_name = 'users' 
+      AND column_name = 'username'
+    `);
+    
+    if (usernameCheck.rows.length === 0) {
+      console.log('📝 Adding missing username column to users table...');
+      await tempPool.query(`
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS username VARCHAR(100)
+      `);
+      // Add unique constraint separately
+      try {
+        await tempPool.query(`
+          ALTER TABLE users 
+          ADD CONSTRAINT users_username_unique UNIQUE (username)
+        `);
+      } catch (err: any) {
+        // Constraint might already exist, ignore
+        if (!err.message.includes('already exists')) {
+          throw err;
+        }
+      }
+      console.log('✅ Added username column to users table');
+    }
+    
+    // Check profile_picture column
+    const profilePictureCheck = await tempPool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      AND table_name = 'users' 
+      AND column_name = 'profile_picture'
+    `);
+    
+    if (profilePictureCheck.rows.length === 0) {
+      console.log('📝 Adding missing profile_picture column to users table...');
+      await tempPool.query(`
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS profile_picture VARCHAR(500)
+      `);
+      console.log('✅ Added profile_picture column to users table');
+    }
+    
+    console.log('✅ Database schema check completed');
+  } catch (error: any) {
+    console.warn('⚠️  Schema check warning:', error.message);
+    // Don't throw - allow the app to continue even if schema check fails
   }
 }
 
