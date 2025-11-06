@@ -62,47 +62,74 @@ export class EmailService {
       // Check if email is configured
       if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
         console.log('📧 Email not configured - credentials will be logged instead');
+        console.log('   SMTP_USER:', process.env.SMTP_USER ? 'Set' : 'Not set');
+        console.log('   SMTP_PASS:', process.env.SMTP_PASS ? 'Set' : 'Not set');
         this.logCredentialsToConsole(options);
-        return true; // Return true to not break the flow
+        return false; // Return false to indicate email was not sent
       }
 
       // Initialize or reinitialize transporter if needed
       if (!this.transporter) {
+        console.log('📧 Initializing email transporter...');
         this.initialize();
       }
 
-      // Skip verification to speed up email sending - connection will be verified on first send
       const mailOptions = {
         from: process.env.SMTP_FROM || process.env.SMTP_USER,
         to: options.to,
         subject: options.subject,
         html: options.html,
-        text: options.text,
+        text: options.text || this.extractTextFromHtml(options.html),
       };
 
+      console.log(`📧 Sending email to ${options.to}...`);
+      console.log(`   From: ${mailOptions.from}`);
+      console.log(`   Subject: ${options.subject}`);
+      
       const result = await this.transporter.sendMail(mailOptions);
-      console.log('📧 Email sent successfully:', result.messageId);
+      console.log('✅ Email sent successfully!');
+      console.log(`   Message ID: ${result.messageId}`);
+      console.log(`   Response: ${result.response || 'No response'}`);
       return true;
     } catch (error: any) {
-      console.error('📧 Email sending failed:', error.message || error);
+      console.error('❌ Email sending failed!');
+      console.error('   Error message:', error.message || error);
       if (error.code) {
         console.error('   Error code:', error.code);
       }
       if (error.response) {
         console.error('   SMTP response:', error.response);
       }
+      if (error.responseCode) {
+        console.error('   Response code:', error.responseCode);
+      }
+      if (error.command) {
+        console.error('   Failed command:', error.command);
+      }
       
       // Try to reinitialize transporter on error
       try {
+        console.log('🔄 Attempting to reinitialize transporter...');
         this.initialize();
-      } catch (initError) {
-        // Ignore initialization errors
+      } catch (initError: any) {
+        console.error('   Failed to reinitialize:', initError.message);
       }
       
       console.log('📧 Falling back to console logging...');
       this.logCredentialsToConsole(options);
-      return true; // Return true to not break the flow
+      return false; // Return false to indicate email was not sent
     }
+  }
+
+  /**
+   * Extract plain text from HTML for email fallback
+   */
+  private static extractTextFromHtml(html: string): string {
+    // Simple HTML to text conversion
+    return html
+      .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
   }
 
   /**

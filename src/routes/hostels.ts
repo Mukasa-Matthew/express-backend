@@ -377,64 +377,88 @@ router.post('/', async (req, res) => {
         }
       });
 
+      // Prepare email data
+      const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
+      const emailHtml = EmailService.generateHostelAdminWelcomeEmail(
+        admin_name,
+        admin_email,
+        temporaryUsername,
+        temporaryPassword,
+        hostel.name,
+        loginUrl,
+        {
+          planName: plan.name,
+          startDate: startDate,
+          endDate: endDate,
+          durationMonths: durationMonths,
+          pricePerMonth: parseFloat(plan.price_per_month || 0),
+          totalPrice: parseFloat(plan.total_price || 0),
+          amountPaid: 0,
+          paymentReference: subscription.payment_reference
+        }
+      );
+
+      const emailOptions = {
+        to: admin_email,
+        subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
+        html: emailHtml
+      };
+
       // Send welcome email asynchronously (non-blocking)
       // This runs in the background and won't delay the API response
-      setImmediate(async () => {
+      (async () => {
         try {
-          const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-          const emailHtml = EmailService.generateHostelAdminWelcomeEmail(
-            admin_name,
-            admin_email,
-            temporaryUsername,
-            temporaryPassword,
-            hostel.name,
-            loginUrl,
-            {
-              planName: plan.name,
-              startDate: startDate,
-              endDate: endDate,
-              durationMonths: durationMonths,
-              pricePerMonth: parseFloat(plan.price_per_month || 0),
-              totalPrice: parseFloat(plan.total_price || 0),
-              amountPaid: 0,
-              paymentReference: subscription.payment_reference
-            }
-          );
-
-          await EmailService.sendEmail({
-            to: admin_email,
-            subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
-            html: emailHtml
-          });
-
-          console.log(`✅ Welcome email sent to ${admin_email}`);
+          console.log(`\n📧 Attempting to send welcome email to ${admin_email}...`);
+          console.log(`   Hostel: ${hostel.name}`);
+          console.log(`   Admin: ${admin_name}`);
+          
+          const emailSent = await EmailService.sendEmail(emailOptions);
+          
+          if (emailSent) {
+            console.log(`✅ Welcome email sent successfully to ${admin_email}`);
+          } else {
+            console.warn(`\n⚠️ Email sending returned false for ${admin_email}`);
+            console.warn('   This usually means SMTP is not configured or email failed.');
+            // Fallback: log credentials to console with explicit values
+            console.log('\n' + '='.repeat(70));
+            console.log('📋 FALLBACK: TEMPORARY LOGIN CREDENTIALS');
+            console.log('='.repeat(70));
+            console.log(`To: ${admin_email}`);
+            console.log(`Hostel: ${hostel.name}`);
+            console.log(`Admin Name: ${admin_name}`);
+            console.log('─'.repeat(70));
+            console.log('🔐 TEMPORARY CREDENTIALS:');
+            console.log(`   Username/Email: ${temporaryUsername}`);
+            console.log(`   Password: ${temporaryPassword}`);
+            console.log('─'.repeat(70));
+            console.log(`Login URL: ${loginUrl}`);
+            console.log('='.repeat(70) + '\n');
+            EmailService.logCredentialsToConsole(emailOptions);
+          }
         } catch (emailError: any) {
-          console.error('Error sending welcome email:', emailError.message);
-          // Log credentials to console as fallback
-          EmailService.logCredentialsToConsole({
-            to: admin_email,
-            subject: `Welcome to LTS Portal - Hostel Admin for ${hostel.name}`,
-            html: EmailService.generateHostelAdminWelcomeEmail(
-              admin_name,
-              admin_email,
-              temporaryUsername,
-              temporaryPassword,
-              hostel.name,
-              `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`,
-              {
-                planName: plan.name,
-                startDate: startDate,
-                endDate: endDate,
-                durationMonths: durationMonths,
-                pricePerMonth: parseFloat(plan.price_per_month || 0),
-                totalPrice: parseFloat(plan.total_price || 0),
-                amountPaid: 0,
-                paymentReference: subscription.payment_reference
-              }
-            )
-          });
+          console.error('\n❌ Error sending welcome email:', emailError);
+          console.error('   Error message:', emailError.message);
+          console.error('   Error code:', emailError.code);
+          if (emailError.stack) {
+            console.error('   Stack:', emailError.stack);
+          }
+          // Always log credentials to console as fallback with explicit values
+          console.log('\n' + '='.repeat(70));
+          console.log('📋 FALLBACK: TEMPORARY LOGIN CREDENTIALS (Email Failed)');
+          console.log('='.repeat(70));
+          console.log(`To: ${admin_email}`);
+          console.log(`Hostel: ${hostel.name}`);
+          console.log(`Admin Name: ${admin_name}`);
+          console.log('─'.repeat(70));
+          console.log('🔐 TEMPORARY CREDENTIALS:');
+          console.log(`   Username/Email: ${temporaryUsername}`);
+          console.log(`   Password: ${temporaryPassword}`);
+          console.log('─'.repeat(70));
+          console.log(`Login URL: ${loginUrl}`);
+          console.log('='.repeat(70) + '\n');
+          EmailService.logCredentialsToConsole(emailOptions);
         }
-      });
+      })();
 
     } catch (error) {
       await client.query('ROLLBACK');
