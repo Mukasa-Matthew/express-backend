@@ -21,7 +21,8 @@
     "check-migrations": "ts-node src/debug/check-migration-status.ts",
     "fix-migrations": "ts-node src/debug/fix-migration-state.ts",
     "fix-vps-migrations": "ts-node src/debug/fix-vps-migrations.ts",
-    "test-email": "ts-node src/debug/test-email-config.ts"
+    "test-email": "ts-node src/debug/test-email-config.ts",
+    "test-resend": "ts-node src/debug/test-resend-email.ts"
   },
   "keywords": [
     "lts",
