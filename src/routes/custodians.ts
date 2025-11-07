@@ -203,10 +203,46 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
         }
       }
     });
-  } catch (e) {
-    await client.query('ROLLBACK');
+  } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {}); // Ignore rollback errors
     console.error('Create custodian error:', e);
-    res.status(500).json({ success: false, message: 'Internal server error' });
+    
+    // Handle Prisma unique constraint violation (P2002)
+    if (e.code === 'P2002') {
+      const target = e.meta?.target || [];
+      if (target.includes('email')) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'A user with this email address already exists. Please use a different email.' 
+        });
+      }
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Duplicate entry detected. This record already exists.' 
+      });
+    }
+    
+    // Handle PostgreSQL unique constraint violation (23505)
+    if (e.code === '23505') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'A user with this email address already exists. Please use a different email.' 
+      });
+    }
+    
+    // Handle other validation errors
+    if (e.message && e.message.includes('email')) {
+      return res.status(400).json({ 
+        success: false, 
+        message: e.message 
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? e.message : undefined
+    });
   } finally {
     client.release();
   }
