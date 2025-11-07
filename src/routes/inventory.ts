@@ -32,7 +32,10 @@ router.get('/', async (req, res) => {
     let targetHostelId: number | null = null;
     if (currentUser.role === 'hostel_admin' || currentUser.role === 'custodian') {
       targetHostelId = await getHostelId(currentUser.id, currentUser.role);
-      if (!targetHostelId) return res.status(403).json({ success: false, message: 'Forbidden: no hostel assigned' });
+      if (!targetHostelId) {
+        console.error(`[Inventory] User ${currentUser.id} (${currentUser.role}) has no hostel_id assigned`);
+        return res.status(403).json({ success: false, message: 'Forbidden: no hostel assigned' });
+      }
     } else if (currentUser.role === 'super_admin') {
       // Super admin can optionally filter by hostel_id
       const q = req.query.hostel_id as string | undefined;

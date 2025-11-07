@@ -44,8 +44,12 @@ router.get('/', async (req, res) => {
 
     // Determine target hostel id
     let targetHostelId: number | null = null;
-    if (currentUser.role === 'hostel_admin' && currentUser.hostel_id) {
-      targetHostelId = currentUser.hostel_id;
+    if (currentUser.role === 'hostel_admin') {
+      targetHostelId = currentUser.hostel_id || null;
+      if (!targetHostelId) {
+        console.error(`[Custodians] Hostel admin ${currentUser.id} has no hostel_id assigned`);
+        return res.status(403).json({ success: false, message: 'Forbidden: no hostel assigned' });
+      }
     } else if (currentUser.role === 'super_admin') {
       const q = req.query.hostel_id as string | undefined;
       targetHostelId = q ? parseInt(q) : null;
