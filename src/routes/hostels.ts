@@ -362,6 +362,7 @@ router.post('/', async (req, res) => {
       await client.query('COMMIT');
 
       // Send response immediately - don't wait for email
+      // Include credentials in response so super admin can view/copy them
       res.status(201).json({
         success: true,
         message: 'Hostel and admin created successfully. Welcome email will be sent shortly.',
@@ -373,6 +374,11 @@ router.post('/', async (req, res) => {
             name: admin.name,
             role: admin.role,
             hostel_id: hostel.id
+          },
+          credentials: {
+            username: temporaryUsername,
+            password: temporaryPassword,
+            loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
           }
         }
       });
@@ -727,7 +733,27 @@ router.post('/:id/resend-credentials', async (req, res) => {
       ['resend_admin_credentials', currentUser.id, admin.id, hostelId, 'success', 'Password rotated and email sent', ip, (req.headers['user-agent'] as string) || null]
     );
 
-    res.json({ success: true, message: 'New credentials sent successfully' });
+    // Return credentials in response so super admin can view/copy them
+    res.json({ 
+      success: true, 
+      message: 'New credentials generated and sent successfully',
+      data: {
+        credentials: {
+          username: admin.email,
+          password: newTemporaryPassword,
+          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        },
+        admin: {
+          id: admin.id,
+          email: admin.email,
+          name: admin.name
+        },
+        hostel: {
+          id: hostel.id,
+          name: hostel.name
+        }
+      }
+    });
 
   } catch (error) {
     console.error('Resend credentials error:', error);
@@ -749,7 +775,99 @@ router.post('/:id/resend-credentials', async (req, res) => {
   }
 });
 
-export default router;
+// View/generate credentials for hostel admin (super_admin only)
+// Since passwords are hashed, this endpoint generates new credentials and returns them
+// Use ?update=false to just get admin info without generating new password
+router.get('/:id/view-credentials', async (req, res) => {
+  try {
+    const authResult = await verifyTokenAndGetUser(req);
+    if (!authResult) {
+      return res.status(401).json({ success: false, message: 'No token provided or invalid token' });
+    }
+    
+    if (authResult.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    
+    const hostelId = parseInt(req.params.id);
+    const generateNew = req.query.generate !== 'false'; // Default: generate new credentials
+
+    // Get hostel details
+    const hostel = await HostelModel.findById(hostelId);
+    if (!hostel) {
+      return res.status(404).json({
+        success: false,
+        message: 'Hostel not found'
+      });
+    }
+
+    // Get the hostel admin by hostel_id
+    const adminQuery = 'SELECT * FROM users WHERE hostel_id = $1 AND role = $2';
+    const adminResult = await pool.query(adminQuery, [hostelId, 'hostel_admin']);
+    const admin = adminResult.rows[0];
+    
+    if (!admin) {
+      return res.status(404).json({
+        success: false,
+        message: 'Hostel admin not found'
+      });
+    }
+
+    if (!generateNew) {
+      // Just return admin info without generating new password
+      return res.json({
+        success: true,
+        message: 'Admin information retrieved. Passwords are hashed and cannot be retrieved.',
+        data: {
+          admin: {
+            id: admin.id,
+            email: admin.email,
+            name: admin.name,
+            username: admin.email
+          },
+          hostel: {
+            id: hostel.id,
+            name: hostel.name
+          },
+          note: 'Passwords are securely hashed and cannot be retrieved. Use ?generate=true or the resend-credentials endpoint to generate new credentials.'
+        }
+      });
+    }
+
+    // Generate new temporary password and update it
+    const temporaryPassword = CredentialGenerator.generatePatternPassword();
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
+    await UserModel.update(admin.id, { password: hashedPassword });
+
+    res.json({
+      success: true,
+      message: 'New credentials generated successfully',
+      data: {
+        credentials: {
+          username: admin.email,
+          password: temporaryPassword,
+          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        },
+        admin: {
+          id: admin.id,
+          email: admin.email,
+          name: admin.name
+        },
+        hostel: {
+          id: hostel.id,
+          name: hostel.name
+        }
+      }
+    });
+
+  } catch (error: any) {
+    console.error('View credentials error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
 
 // Admin summary for a hostel: primary admin and custodian count
 router.get('/:id/admin-summary', async (req, res) => {
@@ -801,4 +919,6 @@ router.get('/:id/admin-summary', async (req, res) => {
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
+
+export default router;
 

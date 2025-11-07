@@ -113,3 +113,5 @@ Until you verify a domain, you can:
 1. Use SMTP (Gmail) as a temporary solution
 2. Or manually share credentials with the admin after finding them in logs
 
+
+

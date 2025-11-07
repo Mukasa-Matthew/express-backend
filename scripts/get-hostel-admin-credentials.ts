@@ -111,3 +111,5 @@ const adminEmail = emailArg ? emailArg.split('=')[1] : undefined;
 
 getHostelAdminCredentials(hostelId, adminEmail);
 
+
+

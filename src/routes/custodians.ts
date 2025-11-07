@@ -138,7 +138,24 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       console.warn('Custodian welcome email failed:', e);
     }
 
-    res.status(201).json({ success: true, message: 'Custodian created successfully' });
+    // Return credentials in response so hostel admin can view/copy them
+    res.status(201).json({ 
+      success: true, 
+      message: 'Custodian created successfully. Welcome email will be sent shortly.',
+      data: {
+        custodian: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: 'custodian'
+        },
+        credentials: {
+          username: email,
+          password: tempPassword,
+          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        }
+      }
+    });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('Create custodian error:', e);
@@ -289,7 +306,24 @@ router.post('/:id/resend-credentials', async (req: Request, res) => {
       ['resend_custodian_credentials', currentUser.id, row.user_id, row.hostel_id, 'success', 'Password rotated and email sent', ip, (req.headers['user-agent'] as string) || null]
     );
 
-    res.json({ success: true, message: 'New credentials sent successfully' });
+    // Return credentials in response so hostel admin can view/copy them
+    res.json({ 
+      success: true, 
+      message: 'New credentials generated and sent successfully',
+      data: {
+        credentials: {
+          username: row.email,
+          password: tempPassword,
+          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        },
+        custodian: {
+          id: row.id,
+          user_id: row.user_id,
+          email: row.email,
+          name: row.name
+        }
+      }
+    });
   } catch (e) {
     await pool.query('ROLLBACK');
     console.error('Resend custodian credentials error:', e);
@@ -307,6 +341,86 @@ router.post('/:id/resend-credentials', async (req: Request, res) => {
     res.status(500).json({ success: false, message: 'Internal server error' });
   } finally {
     client.release();
+  }
+});
+
+// View/generate credentials for a custodian (hostel_admin or super_admin)
+// Since passwords are hashed, this endpoint generates new credentials and returns them
+router.get('/:id/view-credentials', async (req: Request, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    const { id } = req.params;
+    const generateNew = req.query.generate !== 'false'; // Default: generate new credentials
+
+    // Fetch custodian and ensure access
+    const custodianRes = await pool.query(
+      `SELECT c.id, c.user_id, c.hostel_id, u.email, u.name
+       FROM custodians c
+       JOIN users u ON u.id = c.user_id
+       WHERE c.id = $1`,
+      [parseInt(id)]
+    );
+    if (!custodianRes.rowCount) return res.status(404).json({ success: false, message: 'Custodian not found' });
+    const row = custodianRes.rows[0];
+
+    // Check permissions: super_admin or hostel_admin of same hostel
+    if (currentUser.role !== 'super_admin' && (!currentUser.hostel_id || currentUser.hostel_id !== row.hostel_id)) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    if (!generateNew) {
+      // Just return custodian info without generating new password
+      return res.json({
+        success: true,
+        message: 'Custodian information retrieved. Passwords are hashed and cannot be retrieved.',
+        data: {
+          custodian: {
+            id: row.id,
+            user_id: row.user_id,
+            email: row.email,
+            name: row.name,
+            username: row.email
+          },
+          note: 'Passwords are securely hashed and cannot be retrieved. Use ?generate=true or the resend-credentials endpoint to generate new credentials.'
+        }
+      });
+    }
+
+    // Generate new temporary password and update it
+    const tempPassword = CredentialGenerator.generatePatternPassword();
+    const hashed = await bcrypt.hash(tempPassword, 10);
+
+    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, row.user_id]);
+
+    res.json({
+      success: true,
+      message: 'New credentials generated successfully',
+      data: {
+        credentials: {
+          username: row.email,
+          password: tempPassword,
+          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        },
+        custodian: {
+          id: row.id,
+          user_id: row.user_id,
+          email: row.email,
+          name: row.name
+        }
+      }
+    });
+
+  } catch (error: any) {
+    console.error('View custodian credentials error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
   }
 });
 

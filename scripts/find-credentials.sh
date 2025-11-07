@@ -33,3 +33,5 @@ echo "   3. Check the error log: pm2 logs express-backend --err --lines 500"
 echo "   4. Use the resend-credentials endpoint after fixing email config"
 echo ""
 
+
+

@@ -214,3 +214,5 @@ chmod +x test-email.sh
 4. Test email configuration (Option 4)
 5. Resend credentials once email is working (Option 2)
 
+
+
