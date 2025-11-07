@@ -57,6 +57,9 @@ router.get('/', async (req, res) => {
     } else {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
+    
+    // Log for debugging
+    console.log(`[Custodians] Fetching custodians for hostel_id: ${targetHostelId}, currentUser: ${currentUser.role} (${currentUser.id})`);
 
     // Check if phone column exists in custodians table
     const columnCheck = await pool.query(`
@@ -97,22 +100,75 @@ router.get('/', async (req, res) => {
     
     const result = await pool.query(query, params);
     
+    // Log the raw query result for debugging
+    console.log('Raw custodians query result:', result.rows);
+    
     // Map results to ensure all expected fields exist
-    const mappedRows = result.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      phone: row.phone || null,
-      location: row.location || null,
-      national_id_image_path: row.national_id_image_path || null,
-      status: row.status || 'active',
-      created_at: row.created_at,
-      hostel_id: row.hostel_id
-    }));
+    const mappedRows = result.rows.map(row => {
+      const mapped = {
+        id: row.id,
+        name: row.name || 'Unknown',
+        email: row.email || null, // Ensure email is included
+        phone: row.phone || null,
+        location: row.location || null,
+        national_id_image_path: row.national_id_image_path || null,
+        status: row.status || 'active',
+        created_at: row.created_at,
+        hostel_id: row.hostel_id
+      };
+      console.log('Mapped custodian:', mapped);
+      return mapped;
+    });
     
     res.json({ success: true, data: mappedRows });
   } catch (e) {
     console.error('List custodians error:', e);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Get current custodian's hostel information (must be before /:id routes)
+router.get('/my-hostel', async (req: Request, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    // Only custodians can access this endpoint
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ success: false, message: 'Forbidden: This endpoint is for custodians only' });
+    }
+
+    // Get custodian's hostel_id
+    const custodianResult = await pool.query(
+      'SELECT c.hostel_id, h.name as hostel_name, h.address, h.contact_phone, h.contact_email FROM custodians c LEFT JOIN hostels h ON h.id = c.hostel_id WHERE c.user_id = $1',
+      [currentUser.id]
+    );
+
+    if (custodianResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Custodian record not found' });
+    }
+
+    const row = custodianResult.rows[0];
+    
+    if (!row.hostel_id) {
+      return res.status(404).json({ success: false, message: 'No hostel assigned to this custodian' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        hostel_id: row.hostel_id,
+        hostel_name: row.hostel_name,
+        address: row.address,
+        contact_phone: row.contact_phone,
+        contact_email: row.contact_email
+      }
+    });
+  } catch (e) {
+    console.error('Get custodian hostel error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -144,8 +200,81 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     }
 
     const { name, email, phone, location } = req.body;
-    if (!name || !email || !phone || !location) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    if (!name || !email) {
+      return res.status(400).json({ success: false, message: 'Missing required fields: name and email are required' });
+    }
+    
+    // Check which columns exist in custodians table (do this once and reuse)
+    const phoneCheckResult = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'phone'
+    `);
+    const locationCheckResult = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'location'
+    `);
+    const nationalIdCheckResult = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'national_id_image_path'
+    `);
+    
+    const hasPhoneColumn = phoneCheckResult.rows.length > 0;
+    const hasLocationColumn = locationCheckResult.rows.length > 0;
+    const hasNationalIdColumn = nationalIdCheckResult.rows.length > 0;
+    
+    // Only validate phone/location if the columns exist
+    if (hasPhoneColumn && !phone) {
+      return res.status(400).json({ success: false, message: 'Phone number is required' });
+    }
+    if (hasLocationColumn && !location) {
+      return res.status(400).json({ success: false, message: 'Location is required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, message: 'Invalid email format' });
+    }
+
+    // Check if email already exists before attempting to create
+    const existingUser = await pool.query(
+      'SELECT id, name, email, role, hostel_id FROM users WHERE email = $1', 
+      [email]
+    );
+    if (existingUser.rows.length > 0) {
+      const user = existingUser.rows[0];
+      const userRole = user.role || 'unknown';
+      const userName = user.name || 'Unknown';
+      
+      // Get more context about the user
+      let additionalInfo = '';
+      if (userRole === 'custodian') {
+        const custodianCheck = await pool.query(
+          'SELECT id, hostel_id FROM custodians WHERE user_id = $1',
+          [user.id]
+        );
+        if (custodianCheck.rows.length > 0) {
+          const custodian = custodianCheck.rows[0];
+          const hostelCheck = await pool.query('SELECT name FROM hostels WHERE id = $1', [custodian.hostel_id]);
+          const hostelName = hostelCheck.rows[0]?.name || 'Unknown Hostel';
+          additionalInfo = ` This email is already registered as a custodian (${userName}) for ${hostelName}.`;
+        }
+      } else {
+        additionalInfo = ` This email is already registered as a ${userRole} (${userName}).`;
+      }
+      
+      return res.status(400).json({ 
+        success: false, 
+        message: `A user with this email address already exists.${additionalInfo} Please use a different email.`,
+        existingUser: {
+          name: userName,
+          email: user.email,
+          role: userRole
+        }
+      });
     }
 
     const nationalIdPath = (req as any).file ? `/uploads/${(req as any).file.filename}` : null;
@@ -159,28 +288,61 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
 
     // Force role to custodian via direct update to avoid TypeScript union change
     await client.query('UPDATE users SET role = $1 WHERE id = $2', ['custodian', user.id]);
-
+    
+    // Build dynamic INSERT query based on available columns
+    const insertColumns = ['user_id', 'hostel_id'];
+    const insertValues: any[] = [user.id, targetHostelId];
+    
+    if (hasPhoneColumn) {
+      insertColumns.push('phone');
+      insertValues.push(phone);
+    }
+    if (hasLocationColumn) {
+      insertColumns.push('location');
+      insertValues.push(location);
+    }
+    if (hasNationalIdColumn) {
+      insertColumns.push('national_id_image_path');
+      insertValues.push(nationalIdPath);
+    }
+    
     // Insert custodian profile
+    const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
     await client.query(
-      `INSERT INTO custodians (user_id, hostel_id, phone, location, national_id_image_path)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [user.id, targetHostelId, phone, location, nationalIdPath]
+      `INSERT INTO custodians (${insertColumns.join(', ')})
+       VALUES (${placeholders})`,
+      insertValues
     );
 
     await client.query('COMMIT');
 
+    // Fetch hostel name for email
+    let hostelName = 'Your Hostel';
+    try {
+      const hostelResult = await pool.query('SELECT name FROM hostels WHERE id = $1', [targetHostelId]);
+      if (hostelResult.rows.length > 0) {
+        hostelName = hostelResult.rows[0].name;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch hostel name for email:', e);
+    }
+
     // Send welcome email
     try {
       const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-      const html = EmailService.generateHostelAdminWelcomeEmail(
+      const html = EmailService.generateCustodianWelcomeEmail(
         name,
         email,
         email,
         tempPassword,
-        'Your Hostel',
+        hostelName,
         loginUrl
       );
-      await EmailService.sendEmail({ to: email, subject: 'Your Custodian Account - LTS Portal', html });
+      await EmailService.sendEmail({ 
+        to: email, 
+        subject: `Your Custodian Account - ${hostelName} - LTS Portal`, 
+        html 
+      });
     } catch (e) {
       console.warn('Custodian welcome email failed:', e);
     }
@@ -204,13 +366,23 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       }
     });
   } catch (e: any) {
-    await client.query('ROLLBACK').catch(() => {}); // Ignore rollback errors
-    console.error('Create custodian error:', e);
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      // Ignore rollback errors
+    }
+    
+    console.error('Create custodian error:', {
+      code: e.code,
+      message: e.message,
+      meta: e.meta,
+      stack: e.stack
+    });
     
     // Handle Prisma unique constraint violation (P2002)
     if (e.code === 'P2002') {
-      const target = e.meta?.target || [];
-      if (target.includes('email')) {
+      const target = Array.isArray(e.meta?.target) ? e.meta.target : [];
+      if (target.includes('email') || e.message?.includes('email')) {
         return res.status(400).json({ 
           success: false, 
           message: 'A user with this email address already exists. Please use a different email.' 
@@ -227,6 +399,20 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       return res.status(400).json({ 
         success: false, 
         message: 'A user with this email address already exists. Please use a different email.' 
+      });
+    }
+    
+    // Handle Prisma errors that might be wrapped
+    if (e.message && (e.message.includes('Unique constraint') || e.message.includes('duplicate') || e.message.includes('already exists'))) {
+      if (e.message.toLowerCase().includes('email')) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'A user with this email address already exists. Please use a different email.' 
+        });
+      }
+      return res.status(400).json({ 
+        success: false, 
+        message: 'This record already exists. Please check your input and try again.' 
       });
     }
     
@@ -272,15 +458,138 @@ router.put('/:id', async (req: Request, res) => {
     }
 
     if (name) await pool.query('UPDATE users SET name = $1 WHERE id = (SELECT user_id FROM custodians WHERE id = $2)', [name, id]);
-    await pool.query(
-      'UPDATE custodians SET phone = COALESCE($1, phone), location = COALESCE($2, location), status = COALESCE($3, status) WHERE id = $4',
-      [phone || null, location || null, status || null, id]
-    );
+    
+    // Check which columns exist before updating
+    const phoneCheckUpdate = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'phone'
+    `);
+    const locationCheckUpdate = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'location'
+    `);
+    
+    const hasPhoneCol = phoneCheckUpdate.rows.length > 0;
+    const hasLocationCol = locationCheckUpdate.rows.length > 0;
+    
+    // Build dynamic UPDATE query
+    const updateParts: string[] = [];
+    const updateValues: any[] = [];
+    
+    if (hasPhoneCol && phone !== undefined) {
+      updateParts.push('phone = $' + (updateValues.length + 1));
+      updateValues.push(phone);
+    }
+    if (hasLocationCol && location !== undefined) {
+      updateParts.push('location = $' + (updateValues.length + 1));
+      updateValues.push(location);
+    }
+    if (status !== undefined) {
+      updateParts.push('status = $' + (updateValues.length + 1));
+      updateValues.push(status);
+    }
+    
+    if (updateParts.length > 0) {
+      updateValues.push(id);
+      await pool.query(
+        `UPDATE custodians SET ${updateParts.join(', ')} WHERE id = $${updateValues.length}`,
+        updateValues
+      );
+    }
 
     res.json({ success: true, message: 'Custodian updated successfully' });
   } catch (e) {
     console.error('Update custodian error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Delete user by email (for cases where user exists but isn't a custodian yet)
+router.delete('/by-email/:email', async (req: Request, res) => {
+  const client = await pool.connect();
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    // Only allow hostel_admin and super_admin
+    if (currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const email = decodeURIComponent(req.params.email);
+    
+    // Find user by email
+    const userResult = await pool.query('SELECT id, role, hostel_id, name FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found with this email' });
+    }
+
+    const userToDelete = userResult.rows[0];
+    
+    // If hostel_admin, ensure the user belongs to their hostel (unless it's a user/student)
+    if (currentUser.role === 'hostel_admin') {
+      if (userToDelete.role === 'custodian') {
+        // Check if custodian belongs to this hostel
+        const custodianCheck = await pool.query(
+          'SELECT id FROM custodians WHERE user_id = $1 AND hostel_id = $2',
+          [userToDelete.id, currentUser.hostel_id]
+        );
+        if (custodianCheck.rows.length === 0) {
+          return res.status(403).json({ 
+            success: false, 
+            message: 'This user does not belong to your hostel' 
+          });
+        }
+      } else if (userToDelete.hostel_id !== currentUser.hostel_id) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'This user does not belong to your hostel' 
+        });
+      }
+    }
+
+    // Prevent deleting super_admin
+    if (userToDelete.role === 'super_admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Cannot delete super admin account' 
+      });
+    }
+
+    await client.query('BEGIN');
+
+    // Delete from custodians table if exists (CASCADE should handle this, but being explicit)
+    await client.query('DELETE FROM custodians WHERE user_id = $1', [userToDelete.id]);
+    
+    // Delete from users table (this will CASCADE delete related records)
+    await client.query('DELETE FROM users WHERE id = $1', [userToDelete.id]);
+    
+    await client.query('COMMIT');
+    
+    res.json({ 
+      success: true, 
+      message: `User ${userToDelete.name} (${email}) deleted successfully` 
+    });
+  } catch (e: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Delete user by email error:', e);
+    
+    // Handle foreign key constraint errors
+    if (e.code === '23503') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot delete user: user has associated records (payments, assignments, etc.)' 
+      });
+    }
+    
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -337,11 +646,12 @@ router.post('/:id/resend-credentials', async (req: Request, res) => {
 
     const { id } = req.params;
 
-    // Fetch custodian and ensure access
+    // Fetch custodian with hostel name and ensure access
     const custodianRes = await pool.query(
-      `SELECT c.id, c.user_id, c.hostel_id, u.email, u.name
+      `SELECT c.id, c.user_id, c.hostel_id, u.email, u.name, h.name AS hostel_name
        FROM custodians c
        JOIN users u ON u.id = c.user_id
+       LEFT JOIN hostels h ON h.id = c.hostel_id
        WHERE c.id = $1`,
       [parseInt(id)]
     );
@@ -369,15 +679,20 @@ router.post('/:id/resend-credentials', async (req: Request, res) => {
     // Email credentials
     try {
       const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-      const html = EmailService.generateStudentWelcomeEmail(
+      const hostelName = row.hostel_name || 'Your Hostel';
+      const html = EmailService.generateCustodianWelcomeEmail(
         row.name || 'Custodian',
         row.email,
         row.email,
         tempPassword,
-        'Hostel',
+        hostelName,
         loginUrl
       );
-      await EmailService.sendEmail({ to: row.email, subject: 'New Login Credentials - LTS Portal', html });
+      await EmailService.sendEmail({ 
+        to: row.email, 
+        subject: `New Login Credentials - Custodian - ${hostelName} - LTS Portal`, 
+        html 
+      });
     } catch (e) {
       console.error('Email send error:', e);
     }

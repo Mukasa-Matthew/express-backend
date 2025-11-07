@@ -590,13 +590,33 @@ router.post('/forgot-password', async (req, res) => {
     // Delete any existing tokens for this user
     await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [user.id]);
 
-    // Create new token
-    const token = jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '15m' });
+    // Create new token with OTP in payload
+    const token = jwt.sign({ 
+      userId: user.id, 
+      email: user.email,
+      otp: otp // Store OTP in token payload
+    }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '15m' });
     
-    await pool.query(
-      'INSERT INTO password_reset_tokens (user_id, token, otp, expires_at) VALUES ($1, $2, $3, $4)',
-      [user.id, token, otp, expiresAt]
-    );
+    // Check if otp column exists in password_reset_tokens table
+    const hasOtpColumn = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'password_reset_tokens' AND column_name = 'otp'
+    `);
+    
+    if (hasOtpColumn.rows.length > 0) {
+      // Table has otp column, use it
+      await pool.query(
+        'INSERT INTO password_reset_tokens (user_id, token, otp, expires_at) VALUES ($1, $2, $3, $4)',
+        [user.id, token, otp, expiresAt]
+      );
+    } else {
+      // Table doesn't have otp column, store without it (OTP is in token payload)
+      await pool.query(
+        'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+        [user.id, token, expiresAt]
+      );
+    }
 
     // Send OTP email
     try {
@@ -644,8 +664,27 @@ router.post('/verify-otp', async (req, res) => {
 
     const resetToken = result.rows[0];
 
-    // Verify OTP
-    if (resetToken.otp !== otp) {
+    // Verify OTP - check both token payload and database column (if exists)
+    let isValidOtp = false;
+    
+    // First, try to verify from JWT token payload
+    try {
+      const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
+      if (decoded.otp === otp) {
+        isValidOtp = true;
+      }
+    } catch (jwtError) {
+      // Token invalid or expired
+    }
+    
+    // If OTP column exists in database, also check there
+    if (!isValidOtp && resetToken.otp) {
+      if (resetToken.otp === otp) {
+        isValidOtp = true;
+      }
+    }
+    
+    if (!isValidOtp) {
       return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 
@@ -686,8 +725,27 @@ router.post('/reset-password', async (req, res) => {
 
     const resetToken = result.rows[0];
 
-    // Verify OTP again
-    if (resetToken.otp !== otp) {
+    // Verify OTP - check both token payload and database column (if exists)
+    let isValidOtp = false;
+    
+    // First, try to verify from JWT token payload
+    try {
+      const decoded: any = jwt.verify(verifiedToken, process.env.JWT_SECRET || 'fallback_secret');
+      if (decoded.otp === otp) {
+        isValidOtp = true;
+      }
+    } catch (jwtError) {
+      // Token invalid or expired
+    }
+    
+    // If OTP column exists in database, also check there
+    if (!isValidOtp && resetToken.otp) {
+      if (resetToken.otp === otp) {
+        isValidOtp = true;
+      }
+    }
+    
+    if (!isValidOtp) {
       return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 

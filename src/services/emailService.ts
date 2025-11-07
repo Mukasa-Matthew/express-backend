@@ -19,23 +19,46 @@ export class EmailService {
   private static provider: EmailProvider = 'none';
 
   /**
-   * Determine which email provider to use based on environment variables
+   * Determine which email provider to use based on environment
+   * - Localhost/Development: Use Nodemailer
+   * - VPS/Production: Use Resend
    */
   private static determineProvider(): EmailProvider {
-    // Explicit provider selection
+    // Explicit provider selection (highest priority)
     const explicitProvider = process.env.EMAIL_PROVIDER?.toLowerCase();
     if (explicitProvider === 'resend' || explicitProvider === 'nodemailer') {
       return explicitProvider as EmailProvider;
     }
 
-    // Auto-detect: Resend takes priority if API key is set
-    if (process.env.RESEND_API_KEY) {
-      return 'resend';
-    }
+    // Auto-detect based on environment
+    const isLocalhost = 
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'dev' ||
+      process.env.HOSTNAME === 'localhost' ||
+      process.env.HOSTNAME?.includes('localhost') ||
+      !process.env.NODE_ENV || // Default to localhost if NODE_ENV not set
+      process.env.IS_LOCAL === 'true';
 
-    // Fallback to Nodemailer if SMTP credentials are set
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      return 'nodemailer';
+    if (isLocalhost) {
+      // Localhost: Prefer Nodemailer if credentials are available
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        return 'nodemailer';
+      }
+      // If no SMTP credentials but Resend is available, use Resend as fallback
+      if (process.env.RESEND_API_KEY) {
+        console.log('⚠️  Localhost detected but no SMTP credentials. Using Resend as fallback.');
+        return 'resend';
+      }
+    } else {
+      // VPS/Production: Prefer Resend
+      if (process.env.RESEND_API_KEY) {
+        return 'resend';
+      }
+      // If no Resend but SMTP credentials are available, use Nodemailer as fallback
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        console.log('⚠️  Production environment detected but no Resend API key. Using Nodemailer as fallback.');
+        return 'nodemailer';
+      }
     }
 
     return 'none';
@@ -43,6 +66,21 @@ export class EmailService {
 
   static initialize() {
     this.provider = this.determineProvider();
+
+    // Log environment detection
+    const isLocalhost = 
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'dev' ||
+      process.env.HOSTNAME === 'localhost' ||
+      process.env.HOSTNAME?.includes('localhost') ||
+      !process.env.NODE_ENV ||
+      process.env.IS_LOCAL === 'true';
+    
+    if (isLocalhost) {
+      console.log('🏠 Environment: Localhost/Development');
+    } else {
+      console.log('☁️  Environment: VPS/Production');
+    }
 
     if (this.provider === 'resend') {
       const apiKey = process.env.RESEND_API_KEY;
@@ -428,7 +466,12 @@ export class EmailService {
         <div class="content">
           <h2>Hello ${adminName}!</h2>
           
-          <p>Congratulations! You have been appointed as the Hostel Administrator for <strong>${hostelName}</strong> on the LTS Portal.</p>
+          <div style="background: #dbeafe; border: 2px solid #3b82f6; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
+            <p style="font-size: 14px; color: #1e40af; margin: 0 0 10px 0; font-weight: 600;">YOU HAVE BEEN ASSIGNED AS:</p>
+            <p style="font-size: 18px; color: #1e3a8a; margin: 0; font-weight: bold;">Hostel Admin - ${hostelName}</p>
+          </div>
+          
+          <p>Congratulations! You have been appointed as the <strong>Hostel Administrator</strong> for <strong>${hostelName}</strong> on the LTS Portal.</p>
           
           <p>Your account has been created and you can now access your admin dashboard using the temporary credentials below:</p>
           
@@ -670,6 +713,176 @@ export class EmailService {
           <div class="highlight">
             <strong>Payment Reminder:</strong> Please pay your remaining balance of ${currency} ${balanceAfter.toFixed(2)} before the semester starts.
           </div>` : ''}
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  static generateCustodianWelcomeEmail(
+    custodianName: string,
+    custodianEmail: string,
+    temporaryUsername: string,
+    temporaryPassword: string,
+    hostelName: string,
+    loginUrl: string
+  ): string {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to ${hostelName} - Custodian Account</title>
+        <style>
+          body { 
+            font-family: Arial, sans-serif; 
+            color: #333; 
+            max-width: 600px; 
+            margin: 0 auto; 
+            padding: 20px; 
+          }
+          .header { 
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%); 
+            color: white; 
+            padding: 30px; 
+            border-radius: 10px 10px 0 0; 
+            text-align: center;
+          }
+          .content { 
+            background: #f9f9f9; 
+            padding: 30px; 
+            border-radius: 0 0 10px 10px; 
+          }
+          .assignment-box {
+            background: #d1fae5;
+            border: 2px solid #10b981;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+          }
+          .assignment-title {
+            font-size: 14px;
+            color: #065f46;
+            margin: 0 0 10px 0;
+            font-weight: 600;
+          }
+          .assignment-details {
+            font-size: 18px;
+            color: #047857;
+            margin: 0;
+            font-weight: bold;
+          }
+          .credentials-box { 
+            background: #fff; 
+            border: 2px solid #e5e7eb; 
+            border-radius: 8px; 
+            padding: 20px; 
+            margin: 20px 0; 
+          }
+          .credential-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            margin: 10px 0;
+          }
+          .credential-label { 
+            color: #666; 
+            font-weight: 600;
+          }
+          .credential-value { 
+            font-weight: bold; 
+            color: #047857;
+            font-family: monospace;
+          }
+          .button { 
+            display: inline-block;
+            background: #10b981;
+            color: #fff;
+            padding: 12px 30px;
+            border-radius: 6px;
+            text-decoration: none;
+            margin-top: 12px;
+            font-weight: bold;
+          }
+          .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+          }
+          .footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #666;
+            font-size: 14px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1 style="margin: 0; font-size: 24px;">🏠 Welcome to LTS Portal</h1>
+          <p style="margin: 10px 0 0 0; opacity: 0.95;">Your Custodian Account is Ready!</p>
+        </div>
+        <div class="content">
+          <h2 style="color: #047857;">Hello ${custodianName}!</h2>
+          
+          <div class="assignment-box">
+            <p class="assignment-title">YOU HAVE BEEN ASSIGNED AS:</p>
+            <p class="assignment-details">Custodian - ${hostelName}</p>
+          </div>
+          
+          <p>Congratulations! You have been appointed as a <strong>Custodian</strong> for <strong>${hostelName}</strong> on the LTS Portal.</p>
+          
+          <p>Your account has been created and you can now access your custodian dashboard using the temporary credentials below:</p>
+          
+          <div class="credentials-box">
+            <h3 style="margin-top: 0; color: #047857;">🔐 Your Temporary Login Credentials</h3>
+            <div class="credential-item">
+              <span class="credential-label">Username/Email:</span>
+              <span class="credential-value">${temporaryUsername}</span>
+            </div>
+            <div class="credential-item">
+              <span class="credential-label">Temporary Password:</span>
+              <span class="credential-value">${temporaryPassword}</span>
+            </div>
+          </div>
+          
+          <div class="warning">
+            <strong>⚠️ Important Security Notice:</strong>
+            <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+              <li>This is a temporary password that you must change immediately after your first login</li>
+              <li>Do not share these credentials with anyone</li>
+              <li>For security reasons, please change your password as soon as possible</li>
+            </ul>
+          </div>
+          
+          <p>Click the button below to access your custodian dashboard:</p>
+          <div style="text-align: center;">
+            <a href="${loginUrl}" class="button">Access Custodian Dashboard</a>
+          </div>
+          
+          <h3 style="color: #047857;">What's Next?</h3>
+          <ol style="margin-left: 20px;">
+            <li>Log in using your temporary credentials</li>
+            <li>Change your password to something secure and memorable</li>
+            <li>Explore your custodian dashboard and start managing hostel operations</li>
+          </ol>
+          
+          <p>If you have any questions or need assistance, please don't hesitate to contact your hostel administrator.</p>
+          
+          <p>Welcome aboard!</p>
+          <p><strong>The ${hostelName} Management Team</strong></p>
+        </div>
+        
+        <div class="footer">
+          <p>This email was sent automatically. Please do not reply to this email.</p>
+          <p>© 2024 LTS Portal. All rights reserved.</p>
         </div>
       </body>
       </html>

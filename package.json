@@ -22,7 +22,8 @@
     "fix-migrations": "ts-node src/debug/fix-migration-state.ts",
     "fix-vps-migrations": "ts-node src/debug/fix-vps-migrations.ts",
     "test-email": "ts-node src/debug/test-email-config.ts",
-    "test-resend": "ts-node src/debug/test-resend-email.ts"
+    "test-resend": "ts-node src/debug/test-resend-email.ts",
+    "delete-user": "ts-node scripts/delete-user-by-email.ts"
   },
   "keywords": [
     "lts",

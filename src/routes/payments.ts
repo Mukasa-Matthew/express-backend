@@ -59,12 +59,20 @@ router.post('/', async (req: Request, res) => {
       [user_id, hostelId, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', purpose || 'booking']
     );
 
+    // Check if student_room_assignments table uses student_id or user_id
+    const sraUserIdColumnCheck = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'student_room_assignments' AND (column_name = 'user_id' OR column_name = 'student_id')
+    `);
+    const sraUserIdColumn = sraUserIdColumnCheck.rows[0]?.column_name || 'student_id';
+    
     // Get room assignment and expected price for this semester
     const roomRes = await client.query(
       `SELECT rm.room_number, rm.price::numeric AS expected_price
        FROM student_room_assignments sra
        JOIN rooms rm ON rm.id = sra.room_id
-       WHERE sra.user_id = $1 AND sra.semester_id = $2 AND sra.status = 'active'
+       WHERE sra.${sraUserIdColumn} = $1 AND sra.semester_id = $2 AND sra.status = 'active'
        LIMIT 1`,
       [user_id, semesterCheck.semesterId]
     );
@@ -108,7 +116,19 @@ router.post('/', async (req: Request, res) => {
     // If fully paid now, send thank you & welcome email
     if (expected != null && balanceAfter != null && balanceAfter <= 0) {
       // Fetch student profile for access_number
-      const profileRes = await pool.query('SELECT access_number FROM student_profiles WHERE user_id = $1', [user_id]);
+      // Check if student_profiles table exists, otherwise use students table
+      const studentProfilesCheck = await client.query(`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_name = 'student_profiles'
+      `);
+      const hasStudentProfiles = studentProfilesCheck.rows.length > 0;
+      
+      const profileQuery = hasStudentProfiles
+        ? 'SELECT access_number FROM student_profiles WHERE user_id = $1'
+        : 'SELECT access_number FROM students WHERE user_id = $1';
+      
+      const profileRes = await client.query(profileQuery, [user_id]);
       const accessNumber = profileRes.rows[0]?.access_number || null;
       
       const thankYouHtml = EmailService.generateThankYouWelcomeEmail(
@@ -210,6 +230,14 @@ router.get('/summary', async (req, res) => {
     const totalPaidRes = await pool.query(totalPaidQuery, totalPaidParams);
     const total_collected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
 
+    // Check if student_room_assignments table uses student_id or user_id
+    const sraUserIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'student_room_assignments' AND (column_name = 'user_id' OR column_name = 'student_id')
+    `);
+    const sraUserIdColumn = sraUserIdColumnCheck.rows[0]?.column_name || 'student_id';
+    
     // Per-student expected vs paid (with optional semester filtering)
     const assignmentFilter = semesterId ? 'AND sra.semester_id = $2' : '';
     const paymentFilter = semesterId 
@@ -236,11 +264,33 @@ router.get('/summary', async (req, res) => {
       `;
     }
     
+    // Check if student_profiles table exists, otherwise use students table
+    const studentProfilesCheck = await pool.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_name = 'student_profiles'
+    `);
+    const hasStudentProfiles = studentProfilesCheck.rows.length > 0;
+    
+    // Build the student profile join based on which table exists
+    let studentProfileJoin: string;
+    let studentProfileSelect: string;
+    
+    if (hasStudentProfiles) {
+      // Use student_profiles table
+      studentProfileJoin = 'LEFT JOIN student_profiles sp ON sp.user_id = u.id';
+      studentProfileSelect = 'sp.access_number, sp.phone, sp.whatsapp';
+    } else {
+      // Use students table (fallback)
+      studentProfileJoin = 'LEFT JOIN students s ON s.user_id = u.id';
+      studentProfileSelect = 's.access_number, s.phone_number AS phone, NULL AS whatsapp';
+    }
+    
     const queryParams = semesterId ? [hostelId, semesterId, semesterId, hostelId] : [hostelId, hostelId];
     
     const rowsRes = await pool.query(
       `WITH active_assignment AS (
-        SELECT sra.user_id, rm.price::numeric AS expected, rm.room_number
+        SELECT sra.${sraUserIdColumn} AS user_id, rm.price::numeric AS expected, rm.room_number
         FROM student_room_assignments sra
         JOIN rooms rm ON rm.id = sra.room_id
         WHERE sra.status = 'active' AND rm.hostel_id = $1
@@ -250,12 +300,12 @@ router.get('/summary', async (req, res) => {
         ${paidSubquery}
       )
       SELECT u.id AS user_id, u.name, u.email,
-             sp.access_number, sp.phone, sp.whatsapp,
+             ${studentProfileSelect},
              aa.expected, aa.room_number,
              COALESCE(p.paid, 0)::numeric AS paid,
              CASE WHEN aa.expected IS NULL THEN NULL ELSE (aa.expected - COALESCE(p.paid,0))::numeric END AS balance
       FROM users u
-      LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      ${studentProfileJoin}
       LEFT JOIN active_assignment aa ON aa.user_id = u.id
       LEFT JOIN paid p ON p.user_id = u.id
       WHERE u.role = 'user' AND u.hostel_id = ${semesterId ? '$4' : '$2'}
