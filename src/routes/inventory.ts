@@ -26,18 +26,40 @@ router.get('/', async (req, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
-    const hostelId = await getHostelId(currentUser.id, currentUser.role);
-    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    
+    // Determine target hostel id
+    let targetHostelId: number | null = null;
+    if (currentUser.role === 'hostel_admin' || currentUser.role === 'custodian') {
+      targetHostelId = await getHostelId(currentUser.id, currentUser.role);
+      if (!targetHostelId) return res.status(403).json({ success: false, message: 'Forbidden: no hostel assigned' });
+    } else if (currentUser.role === 'super_admin') {
+      // Super admin can optionally filter by hostel_id
+      const q = req.query.hostel_id as string | undefined;
+      targetHostelId = q ? parseInt(q) : null;
+    } else {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    
     const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
     const limitRaw = Math.max(1, parseInt((req.query.limit as string) || '20', 10));
     const limit = Math.min(100, limitRaw);
     const offset = (page - 1) * limit;
-    const r = await pool.query(
-      `SELECT * FROM inventory_items WHERE hostel_id = $1 ORDER BY created_at DESC
-       LIMIT ${limit} OFFSET ${offset}`,
-      [hostelId]
-    );
+    
+    let query = 'SELECT * FROM inventory_items';
+    const params: any[] = [];
+    let paramIndex = 1;
+    
+    if (targetHostelId) {
+      query += ` WHERE hostel_id = $${paramIndex}`;
+      params.push(targetHostelId);
+      paramIndex++;
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+    
+    const r = await pool.query(query, params);
     res.json({ success: true, data: r.rows, page, limit });
   } catch (e) {
     console.error('List inventory error:', e);

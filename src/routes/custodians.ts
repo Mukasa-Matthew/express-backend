@@ -49,20 +49,24 @@ router.get('/', async (req, res) => {
     } else if (currentUser.role === 'super_admin') {
       const q = req.query.hostel_id as string | undefined;
       targetHostelId = q ? parseInt(q) : null;
+      // Super admin can fetch all custodians if no hostel_id is provided
+    } else {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
-    if (!targetHostelId) {
-      return res.status(403).json({ success: false, message: 'Forbidden: missing hostel context' });
-    }
-
-    const result = await pool.query(
-      `SELECT c.id, u.name, u.email, c.phone, c.location, c.national_id_image_path, c.status, c.created_at
+    let query = `SELECT c.id, u.name, u.email, c.phone, c.location, c.national_id_image_path, c.status, c.created_at, c.hostel_id
        FROM custodians c
-       JOIN users u ON u.id = c.user_id
-       WHERE c.hostel_id = $1
-       ORDER BY c.created_at DESC`,
-      [targetHostelId]
-    );
+       JOIN users u ON u.id = c.user_id`;
+    const params: any[] = [];
+    
+    if (targetHostelId) {
+      query += ' WHERE c.hostel_id = $1';
+      params.push(targetHostelId);
+    }
+    
+    query += ' ORDER BY c.created_at DESC';
+    
+    const result = await pool.query(query, params);
     res.json({ success: true, data: result.rows });
   } catch (e) {
     console.error('List custodians error:', e);
