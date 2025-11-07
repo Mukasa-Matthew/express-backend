@@ -167,20 +167,79 @@ router.get('/summary', async (req, res) => {
       return res.json({ success: true, data: cached.data });
     }
 
+    // Check if payments table has hostel_id column
+    const hostelIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'payments' AND column_name = 'hostel_id'
+    `);
+    const hasHostelIdColumn = hostelIdColumnCheck.rows.length > 0;
+    
+    // Check if payments table uses user_id or student_id
+    const userIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'payments' AND (column_name = 'user_id' OR column_name = 'student_id')
+    `);
+    const userIdColumn = userIdColumnCheck.rows[0]?.column_name || 'user_id';
+    
     // Total collected (filtered by semester if provided)
-    const totalPaidQuery = semesterId
-      ? 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1 AND semester_id = $2'
-      : 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1';
-    const totalPaidRes = await pool.query(totalPaidQuery, semesterId ? [hostelId, semesterId] : [hostelId]);
+    let totalPaidQuery: string;
+    let totalPaidParams: any[];
+    
+    if (hasHostelIdColumn) {
+      // Payments table has hostel_id column
+      totalPaidQuery = semesterId
+        ? 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1 AND semester_id = $2'
+        : 'SELECT COALESCE(SUM(amount),0) AS total_collected FROM payments WHERE hostel_id = $1';
+      totalPaidParams = semesterId ? [hostelId, semesterId] : [hostelId];
+    } else {
+      // Payments table doesn't have hostel_id - filter via users table
+      totalPaidQuery = semesterId
+        ? `SELECT COALESCE(SUM(p.amount),0) AS total_collected 
+           FROM payments p 
+           JOIN users u ON u.id = p.${userIdColumn}
+           WHERE u.hostel_id = $1 AND p.semester_id = $2`
+        : `SELECT COALESCE(SUM(p.amount),0) AS total_collected 
+           FROM payments p 
+           JOIN users u ON u.id = p.${userIdColumn}
+           WHERE u.hostel_id = $1`;
+      totalPaidParams = semesterId ? [hostelId, semesterId] : [hostelId];
+    }
+    
+    const totalPaidRes = await pool.query(totalPaidQuery, totalPaidParams);
     const total_collected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
 
     // Per-student expected vs paid (with optional semester filtering)
     const assignmentFilter = semesterId ? 'AND sra.semester_id = $2' : '';
-    const paymentFilter = semesterId ? 'AND semester_id = $3' : '';
+    const paymentFilter = semesterId 
+      ? (hasHostelIdColumn ? 'AND p.semester_id = $3' : 'AND p.semester_id = $3')
+      : '';
+    
+    let paidSubquery: string;
+    if (hasHostelIdColumn) {
+      paidSubquery = `
+        SELECT ${userIdColumn} AS user_id, COALESCE(SUM(amount),0)::numeric AS paid
+        FROM payments
+        WHERE hostel_id = $1
+        ${paymentFilter}
+        GROUP BY ${userIdColumn}
+      `;
+    } else {
+      paidSubquery = `
+        SELECT p.${userIdColumn} AS user_id, COALESCE(SUM(p.amount),0)::numeric AS paid
+        FROM payments p
+        JOIN users u ON u.id = p.${userIdColumn}
+        WHERE u.hostel_id = $1
+        ${paymentFilter}
+        GROUP BY p.${userIdColumn}
+      `;
+    }
+    
     const queryParams = semesterId ? [hostelId, semesterId, semesterId, hostelId] : [hostelId, hostelId];
     
     const rowsRes = await pool.query(
-      `       WITH active_assignment AS (
+      `WITH active_assignment AS (
         SELECT sra.user_id, rm.price::numeric AS expected, rm.room_number
         FROM student_room_assignments sra
         JOIN rooms rm ON rm.id = sra.room_id
@@ -188,11 +247,7 @@ router.get('/summary', async (req, res) => {
         ${assignmentFilter}
       ),
       paid AS (
-        SELECT user_id, COALESCE(SUM(amount),0)::numeric AS paid
-        FROM payments
-        WHERE hostel_id = $1
-        ${paymentFilter}
-        GROUP BY user_id
+        ${paidSubquery}
       )
       SELECT u.id AS user_id, u.name, u.email,
              sp.access_number, sp.phone, sp.whatsapp,

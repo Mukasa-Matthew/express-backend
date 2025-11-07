@@ -58,7 +58,32 @@ router.get('/', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
-    let query = `SELECT c.id, u.name, u.email, c.phone, c.location, c.national_id_image_path, c.status, c.created_at, c.hostel_id
+    // Check if phone column exists in custodians table
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'phone'
+    `);
+    
+    const hasPhoneColumn = columnCheck.rows.length > 0;
+    const hasLocationColumn = (await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'location'
+    `)).rows.length > 0;
+    const hasNationalIdColumn = (await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'custodians' AND column_name = 'national_id_image_path'
+    `)).rows.length > 0;
+    
+    // Build query with available columns
+    let selectColumns = ['c.id', 'u.name', 'u.email', 'c.status', 'c.created_at', 'c.hostel_id'];
+    if (hasPhoneColumn) selectColumns.push('c.phone');
+    if (hasLocationColumn) selectColumns.push('c.location');
+    if (hasNationalIdColumn) selectColumns.push('c.national_id_image_path');
+    
+    let query = `SELECT ${selectColumns.join(', ')}
        FROM custodians c
        JOIN users u ON u.id = c.user_id`;
     const params: any[] = [];
@@ -71,7 +96,21 @@ router.get('/', async (req, res) => {
     query += ' ORDER BY c.created_at DESC';
     
     const result = await pool.query(query, params);
-    res.json({ success: true, data: result.rows });
+    
+    // Map results to ensure all expected fields exist
+    const mappedRows = result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      phone: row.phone || null,
+      location: row.location || null,
+      national_id_image_path: row.national_id_image_path || null,
+      status: row.status || 'active',
+      created_at: row.created_at,
+      hostel_id: row.hostel_id
+    }));
+    
+    res.json({ success: true, data: mappedRows });
   } catch (e) {
     console.error('List custodians error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });

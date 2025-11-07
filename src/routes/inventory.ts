@@ -49,7 +49,22 @@ router.get('/', async (req, res) => {
     const limit = Math.min(100, limitRaw);
     const offset = (page - 1) * limit;
     
-    let query = 'SELECT * FROM inventory_items';
+    // Check if inventory_items table exists, otherwise use inventory table
+    let tableName = 'inventory_items';
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'inventory_items'
+      )
+    `);
+    
+    if (!tableCheck.rows[0]?.exists) {
+      // Use inventory table with column mapping
+      tableName = 'inventory';
+    }
+    
+    let query = `SELECT * FROM ${tableName}`;
     const params: any[] = [];
     let paramIndex = 1;
     
@@ -63,7 +78,26 @@ router.get('/', async (req, res) => {
     params.push(limit, offset);
     
     const r = await pool.query(query, params);
-    res.json({ success: true, data: r.rows, page, limit });
+    
+    // Map columns if using inventory table (different column names)
+    let mappedRows = r.rows;
+    if (tableName === 'inventory') {
+      mappedRows = r.rows.map(row => ({
+        id: row.id,
+        hostel_id: row.hostel_id,
+        name: row.item_name || row.name,
+        quantity: row.quantity,
+        unit: row.unit,
+        category: row.category,
+        purchase_price: null, // inventory table doesn't have this
+        status: row.condition || 'active',
+        notes: row.notes,
+        created_at: row.created_at,
+        updated_at: row.updated_at
+      }));
+    }
+    
+    res.json({ success: true, data: mappedRows, page, limit });
   } catch (e) {
     console.error('List inventory error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
@@ -91,12 +125,47 @@ router.post('/', async (req: Request, res) => {
     
     const { name, quantity, unit, category, purchase_price, status, notes } = req.body as any;
     if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
-    const r = await pool.query(
-      `INSERT INTO inventory_items (hostel_id, name, quantity, unit, category, purchase_price, status, notes, created_at, updated_at)
-       VALUES ($1, $2, COALESCE($3,0), $4, $5, $6, COALESCE($7,'active'), $8, NOW(), NOW()) RETURNING *`,
-      [hostelId, name, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || null, notes || null]
-    );
-    res.status(201).json({ success: true, data: r.rows[0] });
+    
+    // Check which table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'inventory_items'
+      )
+    `);
+    
+    if (tableCheck.rows[0]?.exists) {
+      // Use inventory_items table
+      const r = await pool.query(
+        `INSERT INTO inventory_items (hostel_id, name, quantity, unit, category, purchase_price, status, notes, created_at, updated_at)
+         VALUES ($1, $2, COALESCE($3,0), $4, $5, $6, COALESCE($7,'active'), $8, NOW(), NOW()) RETURNING *`,
+        [hostelId, name, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || null, notes || null]
+      );
+      res.status(201).json({ success: true, data: r.rows[0] });
+    } else {
+      // Use inventory table (different column names)
+      const r = await pool.query(
+        `INSERT INTO inventory (hostel_id, item_name, quantity, unit, category, condition, notes, created_at, updated_at)
+         VALUES ($1, $2, COALESCE($3,0), $4, $5, COALESCE($6,'good'), $7, NOW(), NOW()) RETURNING *`,
+        [hostelId, name, quantity ?? null, unit || null, category || null, status || 'good', notes || null]
+      );
+      // Map response to match expected format
+      const mappedRow = {
+        id: r.rows[0].id,
+        hostel_id: r.rows[0].hostel_id,
+        name: r.rows[0].item_name,
+        quantity: r.rows[0].quantity,
+        unit: r.rows[0].unit,
+        category: r.rows[0].category,
+        purchase_price: null,
+        status: r.rows[0].condition,
+        notes: r.rows[0].notes,
+        created_at: r.rows[0].created_at,
+        updated_at: r.rows[0].updated_at
+      };
+      res.status(201).json({ success: true, data: mappedRow });
+    }
   } catch (e) {
     console.error('Create inventory error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
@@ -116,24 +185,68 @@ router.put('/:id', async (req: Request, res) => {
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
     const { id } = req.params;
+    
+    // Check which table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'inventory_items'
+      )
+    `);
+    const tableName = tableCheck.rows[0]?.exists ? 'inventory_items' : 'inventory';
+    
     // Ensure item belongs to hostel
-    const check = await pool.query('SELECT id FROM inventory_items WHERE id = $1 AND hostel_id = $2', [id, hostelId]);
+    const check = await pool.query(`SELECT id FROM ${tableName} WHERE id = $1 AND hostel_id = $2`, [id, hostelId]);
     if (!check.rowCount) return res.status(404).json({ success: false, message: 'Item not found' });
+    
     const { name, quantity, unit, category, purchase_price, status, notes } = req.body as any;
-    const r = await pool.query(
-      `UPDATE inventory_items SET
-        name = COALESCE($1, name),
-        quantity = COALESCE($2, quantity),
-        unit = COALESCE($3, unit),
-        category = COALESCE($4, category),
-        purchase_price = COALESCE($5, purchase_price),
-        status = COALESCE($6, status),
-        notes = COALESCE($7, notes),
-        updated_at = NOW()
-       WHERE id = $8 RETURNING *`,
-      [name || null, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || null, notes || null, id]
-    );
-    res.json({ success: true, data: r.rows[0] });
+    
+    if (tableName === 'inventory_items') {
+      const r = await pool.query(
+        `UPDATE inventory_items SET
+          name = COALESCE($1, name),
+          quantity = COALESCE($2, quantity),
+          unit = COALESCE($3, unit),
+          category = COALESCE($4, category),
+          purchase_price = COALESCE($5, purchase_price),
+          status = COALESCE($6, status),
+          notes = COALESCE($7, notes),
+          updated_at = NOW()
+         WHERE id = $8 RETURNING *`,
+        [name || null, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || null, notes || null, id]
+      );
+      res.json({ success: true, data: r.rows[0] });
+    } else {
+      // Use inventory table
+      const r = await pool.query(
+        `UPDATE inventory SET
+          item_name = COALESCE($1, item_name),
+          quantity = COALESCE($2, quantity),
+          unit = COALESCE($3, unit),
+          category = COALESCE($4, category),
+          condition = COALESCE($5, condition),
+          notes = COALESCE($6, notes),
+          updated_at = NOW()
+         WHERE id = $7 RETURNING *`,
+        [name || null, quantity ?? null, unit || null, category || null, status || null, notes || null, id]
+      );
+      // Map response
+      const mappedRow = {
+        id: r.rows[0].id,
+        hostel_id: r.rows[0].hostel_id,
+        name: r.rows[0].item_name,
+        quantity: r.rows[0].quantity,
+        unit: r.rows[0].unit,
+        category: r.rows[0].category,
+        purchase_price: null,
+        status: r.rows[0].condition,
+        notes: r.rows[0].notes,
+        created_at: r.rows[0].created_at,
+        updated_at: r.rows[0].updated_at
+      };
+      res.json({ success: true, data: mappedRow });
+    }
   } catch (e) {
     console.error('Update inventory error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
@@ -153,7 +266,18 @@ router.delete('/:id', async (req, res) => {
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
     const { id } = req.params;
-    const r = await pool.query('DELETE FROM inventory_items WHERE id = $1 AND hostel_id = $2', [id, hostelId]);
+    
+    // Check which table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'inventory_items'
+      )
+    `);
+    const tableName = tableCheck.rows[0]?.exists ? 'inventory_items' : 'inventory';
+    
+    const r = await pool.query(`DELETE FROM ${tableName} WHERE id = $1 AND hostel_id = $2`, [id, hostelId]);
     if (!r.rowCount) return res.status(404).json({ success: false, message: 'Item not found' });
     res.json({ success: true, message: 'Item deleted' });
   } catch (e) {

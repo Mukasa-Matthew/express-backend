@@ -41,8 +41,16 @@ router.get('/', async (req, res) => {
     const semesterFilter = semesterId ? 'AND semester_id = $2' : '';
     const queryParams = semesterId ? [hostelId, semesterId, limit, offset] : [hostelId, limit, offset];
     
+    // Check which date column exists
+    const dateColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'expenses' AND (column_name = 'spent_at' OR column_name = 'expense_date')
+    `);
+    const dateColumn = dateColumnCheck.rows[0]?.column_name || 'expense_date';
+    
     const r = await pool.query(
-      `SELECT * FROM expenses WHERE hostel_id = $1 ${semesterFilter} ORDER BY spent_at DESC
+      `SELECT * FROM expenses WHERE hostel_id = $1 ${semesterFilter} ORDER BY ${dateColumn} DESC
        LIMIT $${semesterId ? '3' : '2'} OFFSET $${semesterId ? '4' : '3'}`,
       queryParams
     );
@@ -107,14 +115,49 @@ router.post('/', async (req: Request, res) => {
       return res.status(400).json({ success: false, message: semesterCheck.message });
     }
     
-    const { amount, currency, category, description, spent_at } = req.body as any;
+    const { amount, currency, category, description, spent_at, expense_date } = req.body as any;
     if (!amount) return res.status(400).json({ success: false, message: 'Amount is required' });
-    const r = await pool.query(
-      `INSERT INTO expenses (hostel_id, user_id, semester_id, amount, currency, category, description, spent_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW())) RETURNING *`,
-      [hostelId, currentUser.id, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', category || null, description || null, spent_at || null]
-    );
-    res.status(201).json({ success: true, data: r.rows[0] });
+    
+    // Check which date column exists
+    const dateColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'expenses' AND (column_name = 'spent_at' OR column_name = 'expense_date')
+    `);
+    const dateColumn = dateColumnCheck.rows[0]?.column_name || 'expense_date';
+    const dateValue = spent_at || expense_date || null;
+    
+    // Check if currency column exists
+    const currencyColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'expenses' AND column_name = 'currency'
+    `);
+    const hasCurrencyColumn = currencyColumnCheck.rows.length > 0;
+    
+    // Check if user_id column exists
+    const userIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'expenses' AND (column_name = 'user_id' OR column_name = 'paid_by')
+    `);
+    const userIdColumn = userIdColumnCheck.rows[0]?.column_name || 'paid_by';
+    
+    if (hasCurrencyColumn) {
+      const r = await pool.query(
+        `INSERT INTO expenses (hostel_id, ${userIdColumn}, semester_id, amount, currency, category, description, ${dateColumn})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, CURRENT_DATE)) RETURNING *`,
+        [hostelId, currentUser.id, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', category || null, description || null, dateValue]
+      );
+      res.status(201).json({ success: true, data: r.rows[0] });
+    } else {
+      const r = await pool.query(
+        `INSERT INTO expenses (hostel_id, ${userIdColumn}, semester_id, amount, category, description, ${dateColumn})
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE)) RETURNING *`,
+        [hostelId, currentUser.id, semesterCheck.semesterId, parseFloat(amount), category || null, description || null, dateValue]
+      );
+      res.status(201).json({ success: true, data: r.rows[0] });
+    }
   } catch (e) {
     console.error('Create expense error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
