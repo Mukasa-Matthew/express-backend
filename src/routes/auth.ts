@@ -101,20 +101,23 @@ router.post('/login', async (req, res) => {
     const userByEmail = await UserModel.findByEmail(identifier);
     const user = userByEmail || await UserModel.findByUsername(identifier);
     if (!user) {
-      console.log(`Login attempt failed: User not found for identifier: ${identifier}`);
+      console.log(`[Login] User not found for identifier: ${identifier}`);
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
     if (!user.password) {
-      console.error(`Login attempt failed: User ${user.id} has no password set`);
+      console.error(`[Login] User ${user.id} (${user.email || user.username}) has no password set`);
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
+    console.log(`[Login] Attempting login for user: ${user.email || user.username} (ID: ${user.id})`);
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      console.log(`Login attempt failed: Invalid password for user: ${user.email || user.username}`);
+      console.log(`[Login] Invalid password for user: ${user.email || user.username} (ID: ${user.id})`);
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
+    
+    console.log(`[Login] Successful login for user: ${user.email || user.username} (ID: ${user.id})`);
 
     // For custodians, get hostel_id from custodians table if not in users table
     let hostelId = user.hostel_id || null;
@@ -323,10 +326,34 @@ router.post('/change-password', async (req, res) => {
 
     // Hash new password
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    console.log(`[Change Password] Updating password for user ID: ${decoded.userId}`);
 
-    // Update password
-    const updateData = { password: hashedNewPassword };
-    await UserModel.update(decoded.userId, updateData);
+    // Update password using the dedicated method that properly handles password updates
+    await UserModel.updatePassword(decoded.userId, hashedNewPassword);
+    console.log(`[Change Password] Password update completed for user ID: ${decoded.userId}`);
+    
+    // Verify the password was updated by fetching the user again
+    const updatedUser = await UserModel.findByIdWithPassword(decoded.userId);
+    if (!updatedUser) {
+      console.error('[Change Password] Failed to verify password update - user not found:', decoded.userId);
+      return res.status(500).json({
+        success: false,
+        message: 'Password update verification failed'
+      });
+    }
+    
+    // Verify the new password matches (sanity check)
+    const verifyNewPassword = await bcrypt.compare(newPassword, updatedUser.password);
+    if (!verifyNewPassword) {
+      console.error('[Change Password] Password update verification failed - new password does not match hash');
+      console.error('[Change Password] User email:', user.email);
+      return res.status(500).json({
+        success: false,
+        message: 'Password update verification failed'
+      });
+    }
+    
+    console.log(`[Change Password] Password successfully updated and verified for user: ${user.email} (ID: ${decoded.userId})`);
 
     // Send confirmation email
     try {
