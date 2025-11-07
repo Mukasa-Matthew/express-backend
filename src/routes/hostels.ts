@@ -154,8 +154,9 @@ router.get('/', async (req, res) => {
 });
 
 // View/generate credentials for hostel admin (super_admin only) - MUST come before /:id route
-// Since passwords are hashed, this endpoint generates new credentials and returns them
-// Use ?generate=false to just get admin info without generating new password
+// NOTE: Original passwords cannot be retrieved (they are hashed).
+// This endpoint can generate NEW credentials if ?generate=true is used.
+// By default (no generate param), it returns admin info with a note that original credentials cannot be retrieved.
 router.get('/:id/view-credentials', async (req, res) => {
   try {
     const authResult = await verifyTokenAndGetUser(req);
@@ -168,7 +169,7 @@ router.get('/:id/view-credentials', async (req, res) => {
     }
     
     const hostelId = parseInt(req.params.id);
-    const generateNew = req.query.generate !== 'false'; // Default: generate new credentials
+    const generateNew = req.query.generate === 'true'; // Only generate if explicitly requested
 
     // Get hostel details
     const hostel = await HostelModel.findById(hostelId);
@@ -192,10 +193,10 @@ router.get('/:id/view-credentials', async (req, res) => {
     }
 
     if (!generateNew) {
-      // Just return admin info without generating new password
+      // Return admin info with note that original credentials cannot be retrieved
       return res.json({
         success: true,
-        message: 'Admin information retrieved. Passwords are hashed and cannot be retrieved.',
+        message: 'Admin information retrieved. Original passwords are securely hashed and cannot be retrieved.',
         data: {
           admin: {
             id: admin.id,
@@ -207,19 +208,20 @@ router.get('/:id/view-credentials', async (req, res) => {
             id: hostel.id,
             name: hostel.name
           },
-          note: 'Passwords are securely hashed and cannot be retrieved. Use ?generate=true or the resend-credentials endpoint to generate new credentials.'
+          note: 'Original credentials cannot be retrieved (passwords are securely hashed). Use "Resend Credentials" to generate and send new credentials via email, or add ?generate=true to this URL to generate new credentials.',
+          canGenerateNew: true
         }
       });
     }
 
-    // Generate new temporary password and update it
+    // Generate new temporary password and update it (only if explicitly requested)
     const temporaryPassword = CredentialGenerator.generatePatternPassword();
     const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
     await UserModel.update(admin.id, { password: hashedPassword });
 
     res.json({
       success: true,
-      message: 'New credentials generated successfully',
+      message: 'New credentials generated successfully. Note: These are NEW credentials, not the original ones.',
       data: {
         credentials: {
           username: admin.email,
@@ -234,7 +236,8 @@ router.get('/:id/view-credentials', async (req, res) => {
         hostel: {
           id: hostel.id,
           name: hostel.name
-        }
+        },
+        note: 'These are NEW credentials. The admin\'s password has been updated. The original credentials cannot be retrieved.'
       }
     });
 
