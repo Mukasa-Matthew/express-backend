@@ -348,7 +348,7 @@ router.post('/change-password', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Password changed successfully'
+      message: 'Password changed successfully. A confirmation email has been sent to your registered email address.'
     });
 
   } catch (error) {
