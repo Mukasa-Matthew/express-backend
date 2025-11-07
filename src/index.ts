@@ -204,15 +204,28 @@ async function startServer() {
   }
 
   // Initialize email service (non-blocking)
-  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+  // Supports both Resend (for VPS) and Nodemailer (for local testing)
+  const hasResend = !!process.env.RESEND_API_KEY;
+  const hasNodemailer = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
+  
+  if (hasResend || hasNodemailer) {
     console.log('📧 Initializing email service...');
+    if (hasResend && hasNodemailer) {
+      console.log('   Both Resend and Nodemailer configured');
+      console.log(`   Using: ${process.env.EMAIL_PROVIDER || 'Resend (priority)'}`);
+    } else if (hasResend) {
+      console.log('   Using: Resend');
+    } else {
+      console.log('   Using: Nodemailer (SMTP)');
+    }
     EmailService.initialize(); // Initialize immediately for faster email sending
     // Verify connection in background (non-blocking)
     EmailService.verifyConnection().catch((err) => {
       console.warn('⚠️  Email service verification failed (will retry on first send):', err.message);
     });
   } else {
-    console.log('⚠️  Email service not configured (SMTP_USER or SMTP_PASS not set)');
+    console.log('⚠️  Email service not configured');
+    console.log('   Set RESEND_API_KEY for Resend (VPS) or SMTP_USER/SMTP_PASS for Nodemailer (local)');
     console.log('   Emails will be logged to console instead');
   }
 

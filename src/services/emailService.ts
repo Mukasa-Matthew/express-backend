@@ -1,4 +1,5 @@
-﻿import nodemailer from 'nodemailer';
+﻿import { Resend } from 'resend';
+import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,47 +11,110 @@ export interface EmailOptions {
   text?: string;
 }
 
+type EmailProvider = 'resend' | 'nodemailer' | 'none';
+
 export class EmailService {
-  private static transporter: nodemailer.Transporter;
+  private static resend: Resend | null = null;
+  private static transporter: nodemailer.Transporter | null = null;
+  private static provider: EmailProvider = 'none';
+
+  /**
+   * Determine which email provider to use based on environment variables
+   */
+  private static determineProvider(): EmailProvider {
+    // Explicit provider selection
+    const explicitProvider = process.env.EMAIL_PROVIDER?.toLowerCase();
+    if (explicitProvider === 'resend' || explicitProvider === 'nodemailer') {
+      return explicitProvider as EmailProvider;
+    }
+
+    // Auto-detect: Resend takes priority if API key is set
+    if (process.env.RESEND_API_KEY) {
+      return 'resend';
+    }
+
+    // Fallback to Nodemailer if SMTP credentials are set
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      return 'nodemailer';
+    }
+
+    return 'none';
+  }
 
   static initialize() {
-    const host = process.env.SMTP_HOST || 'smtp.gmail.com';
-    const port = parseInt(process.env.SMTP_PORT || '587');
-    const secureFromEnv = (process.env.SMTP_SECURE || '').toLowerCase();
-    const secure = secureFromEnv === 'true' || port === 465; // auto-secure for 465
+    this.provider = this.determineProvider();
 
-    // For Gmail on port 587, require TLS
-    const requireTLS = !secure && port === 587;
+    if (this.provider === 'resend') {
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) {
+        console.warn('⚠️  RESEND_API_KEY not set - email service will not work');
+        return;
+      }
+      this.resend = new Resend(apiKey);
+      console.log('✅ Resend email service initialized');
+    } else if (this.provider === 'nodemailer') {
+      const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+      const port = parseInt(process.env.SMTP_PORT || '587');
+      const secureFromEnv = (process.env.SMTP_SECURE || '').toLowerCase();
+      const secure = secureFromEnv === 'true' || port === 465;
+      const requireTLS = !secure && port === 587;
 
-    this.transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      requireTLS,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-      tls: {
-        // Do not fail on invalid certificates
-        rejectUnauthorized: false,
-      },
-      pool: true, // Use connection pooling for better performance
-      maxConnections: 5, // Maximum number of connections in the pool
-      maxMessages: 100, // Maximum number of messages per connection
-      rateDelta: 1000, // Time window for rate limiting
-      rateLimit: 14, // Max 14 emails per second (Gmail limit is 20)
-    });
+      this.transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        requireTLS,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+        tls: {
+          rejectUnauthorized: false,
+        },
+        pool: true,
+        maxConnections: 5,
+        maxMessages: 100,
+        rateDelta: 1000,
+        rateLimit: 14,
+      });
+      console.log(`✅ Nodemailer (SMTP) email service initialized (${host}:${port})`);
+    } else {
+      console.warn('⚠️  No email provider configured');
+      console.warn('   Set RESEND_API_KEY for Resend, or SMTP_USER/SMTP_PASS for Nodemailer');
+    }
   }
 
   static async verifyConnection(): Promise<boolean> {
     try {
-      if (!this.transporter) {
+      if (this.provider === 'none') {
         this.initialize();
       }
-      await this.transporter.verify();
-      console.log('✅ Email service connection verified');
-      return true;
+
+      if (this.provider === 'resend') {
+        if (!this.resend) {
+          this.initialize();
+        }
+        if (!this.resend) {
+          console.error('❌ Email service not configured - RESEND_API_KEY not set');
+          return false;
+        }
+        console.log('✅ Email service connection verified (Resend)');
+        return true;
+      } else if (this.provider === 'nodemailer') {
+        if (!this.transporter) {
+          this.initialize();
+        }
+        if (!this.transporter) {
+          console.error('❌ Email service not configured - SMTP credentials not set');
+          return false;
+        }
+        await this.transporter.verify();
+        console.log('✅ Email service connection verified (Nodemailer/SMTP)');
+        return true;
+      } else {
+        console.error('❌ Email service not configured');
+        return false;
+      }
     } catch (error: any) {
       console.error('❌ Email service connection failed:', error.message);
       return false;
@@ -59,57 +123,103 @@ export class EmailService {
 
   static async sendEmail(options: EmailOptions): Promise<boolean> {
     try {
-      // Check if email is configured
-      if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        console.log('📧 Email not configured - credentials will be logged instead');
-        console.log('   SMTP_USER:', process.env.SMTP_USER ? 'Set' : 'Not set');
-        console.log('   SMTP_PASS:', process.env.SMTP_PASS ? 'Set' : 'Not set');
-        this.logCredentialsToConsole(options);
-        return false; // Return false to indicate email was not sent
-      }
-
-      // Initialize or reinitialize transporter if needed
-      if (!this.transporter) {
-        console.log('📧 Initializing email transporter...');
+      // Initialize if not already done
+      if (this.provider === 'none') {
         this.initialize();
       }
 
-      const mailOptions = {
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
-        to: options.to,
-        subject: options.subject,
-        html: options.html,
-        text: options.text || this.extractTextFromHtml(options.html),
-      };
+      // If no provider is configured, fall back to console logging
+      if (this.provider === 'none') {
+        console.log('📧 Email not configured - credentials will be logged instead');
+        this.logCredentialsToConsole(options);
+        return false;
+      }
 
-      console.log(`📧 Sending email to ${options.to}...`);
-      console.log(`   From: ${mailOptions.from}`);
-      console.log(`   Subject: ${options.subject}`);
-      
-      const result = await this.transporter.sendMail(mailOptions);
-      console.log('✅ Email sent successfully!');
-      console.log(`   Message ID: ${result.messageId}`);
-      console.log(`   Response: ${result.response || 'No response'}`);
-      return true;
+      // Use Resend
+      if (this.provider === 'resend') {
+        if (!this.resend) {
+          this.initialize();
+        }
+        if (!this.resend) {
+          console.log('📧 Resend not initialized - falling back to console logging...');
+          this.logCredentialsToConsole(options);
+          return false;
+        }
+
+        const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+        
+        console.log(`📧 [Resend] Sending email to ${options.to}...`);
+        console.log(`   From: ${fromEmail}`);
+        console.log(`   Subject: ${options.subject}`);
+        
+        const result = await this.resend.emails.send({
+          from: fromEmail,
+          to: options.to,
+          subject: options.subject,
+          html: options.html,
+          text: options.text || this.extractTextFromHtml(options.html),
+        });
+
+        if (result.error) {
+          throw new Error(result.error.message || 'Unknown Resend error');
+        }
+
+        console.log('✅ Email sent successfully via Resend!');
+        console.log(`   Message ID: ${result.data?.id || 'N/A'}`);
+        return true;
+      }
+
+      // Use Nodemailer
+      if (this.provider === 'nodemailer') {
+        if (!this.transporter) {
+          this.initialize();
+        }
+        if (!this.transporter) {
+          console.log('📧 Nodemailer not initialized - falling back to console logging...');
+          this.logCredentialsToConsole(options);
+          return false;
+        }
+
+        const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
+        
+        console.log(`📧 [Nodemailer/SMTP] Sending email to ${options.to}...`);
+        console.log(`   From: ${fromEmail}`);
+        console.log(`   Subject: ${options.subject}`);
+        
+        const mailOptions = {
+          from: fromEmail,
+          to: options.to,
+          subject: options.subject,
+          html: options.html,
+          text: options.text || this.extractTextFromHtml(options.html),
+        };
+
+        const result = await this.transporter.sendMail(mailOptions);
+        console.log('✅ Email sent successfully via Nodemailer!');
+        console.log(`   Message ID: ${result.messageId}`);
+        console.log(`   Response: ${result.response || 'No response'}`);
+        return true;
+      }
+
+      // Fallback
+      this.logCredentialsToConsole(options);
+      return false;
     } catch (error: any) {
       console.error('❌ Email sending failed!');
       console.error('   Error message:', error.message || error);
+      if (error.name) {
+        console.error('   Error name:', error.name);
+      }
       if (error.code) {
         console.error('   Error code:', error.code);
       }
       if (error.response) {
         console.error('   SMTP response:', error.response);
       }
-      if (error.responseCode) {
-        console.error('   Response code:', error.responseCode);
-      }
-      if (error.command) {
-        console.error('   Failed command:', error.command);
-      }
       
-      // Try to reinitialize transporter on error
+      // Try to reinitialize on error
       try {
-        console.log('🔄 Attempting to reinitialize transporter...');
+        console.log(`🔄 Attempting to reinitialize ${this.provider}...`);
         this.initialize();
       } catch (initError: any) {
         console.error('   Failed to reinitialize:', initError.message);
@@ -117,7 +227,7 @@ export class EmailService {
       
       console.log('📧 Falling back to console logging...');
       this.logCredentialsToConsole(options);
-      return false; // Return false to indicate email was not sent
+      return false;
     }
   }
 

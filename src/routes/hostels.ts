@@ -421,7 +421,7 @@ router.post('/', async (req, res) => {
             console.log(`✅ Welcome email sent successfully to ${admin_email}`);
           } else {
             console.warn(`\n⚠️ Email sending returned false for ${admin_email}`);
-            console.warn('   This usually means SMTP is not configured or email failed.');
+            console.warn('   This usually means email provider is not configured or email failed.');
             // Fallback: log credentials to console with explicit values
             console.log('\n' + '='.repeat(70));
             console.log('📋 FALLBACK: TEMPORARY LOGIN CREDENTIALS');
