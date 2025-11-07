@@ -305,7 +305,7 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       insertColumns.push('national_id_image_path');
       insertValues.push(nationalIdPath);
     }
-    
+
     // Insert custodian profile
     const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
     await client.query(
@@ -367,7 +367,7 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     });
   } catch (e: any) {
     try {
-      await client.query('ROLLBACK');
+    await client.query('ROLLBACK');
     } catch (rollbackError) {
       // Ignore rollback errors
     }
@@ -493,10 +493,10 @@ router.put('/:id', async (req: Request, res) => {
     
     if (updateParts.length > 0) {
       updateValues.push(id);
-      await pool.query(
+    await pool.query(
         `UPDATE custodians SET ${updateParts.join(', ')} WHERE id = $${updateValues.length}`,
         updateValues
-      );
+    );
     }
 
     res.json({ success: true, message: 'Custodian updated successfully' });

@@ -45,19 +45,19 @@ export class EmailService {
         return 'nodemailer';
       }
       // If no SMTP credentials but Resend is available, use Resend as fallback
-      if (process.env.RESEND_API_KEY) {
+    if (process.env.RESEND_API_KEY) {
         console.log('⚠️  Localhost detected but no SMTP credentials. Using Resend as fallback.');
-        return 'resend';
-      }
+      return 'resend';
+    }
     } else {
       // VPS/Production: Prefer Resend
       if (process.env.RESEND_API_KEY) {
         return 'resend';
       }
       // If no Resend but SMTP credentials are available, use Nodemailer as fallback
-      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
         console.log('⚠️  Production environment detected but no Resend API key. Using Nodemailer as fallback.');
-        return 'nodemailer';
+      return 'nodemailer';
       }
     }
 

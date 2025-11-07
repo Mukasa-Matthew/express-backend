@@ -606,10 +606,10 @@ router.post('/forgot-password', async (req, res) => {
     
     if (hasOtpColumn.rows.length > 0) {
       // Table has otp column, use it
-      await pool.query(
-        'INSERT INTO password_reset_tokens (user_id, token, otp, expires_at) VALUES ($1, $2, $3, $4)',
-        [user.id, token, otp, expiresAt]
-      );
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token, otp, expires_at) VALUES ($1, $2, $3, $4)',
+      [user.id, token, otp, expiresAt]
+    );
     } else {
       // Table doesn't have otp column, store without it (OTP is in token payload)
       await pool.query(
