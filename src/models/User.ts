@@ -1,4 +1,5 @@
 import prisma from '../lib/prisma';
+import pool from '../config/database';
 import { User as PrismaUser, Prisma } from '@prisma/client';
 type PrismaUserUpdateInput = Prisma.UserUpdateInput;
 
@@ -43,19 +44,62 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
 export class UserModel {
   static async create(userData: CreateUserData): Promise<User> {
     const { email, name, password, role, username, hostel_id } = userData;
-    
-    const prismaUser = await prisma.user.create({
-      data: {
-        email,
-        name,
-        password,
-        role,
-        username: username || null,
-        hostelId: hostel_id || null,
-      },
-    });
-    
-    return prismaUserToUser(prismaUser);
+
+    try {
+      const prismaUser = await prisma.user.create({
+        data: {
+          email,
+          name,
+          password,
+          role,
+          username: username || null,
+          hostelId: hostel_id || null,
+        },
+      });
+
+      return prismaUserToUser(prismaUser);
+    } catch (error: any) {
+      // Some deployments still use the legacy users table without Prisma-added columns
+      // (e.g., username/profile_picture). In that case, Prisma will throw because the
+      // column list in the generated INSERT does not match the table definition.
+      const errorMessage = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+      const columnMismatch =
+        errorMessage.includes('column') &&
+        (errorMessage.includes('username') ||
+          errorMessage.includes('profile_picture') ||
+          errorMessage.includes('hostel_id') ||
+          errorMessage.includes('created_at'));
+
+      if (columnMismatch || error?.code === 'P2010') {
+        console.warn(
+          '[UserModel] Falling back to pool.query for user.create due to Prisma column mismatch',
+          error?.message || error
+        );
+
+        const result = await pool.query(
+          `INSERT INTO users (email, name, password, role, hostel_id)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, email, name, password, role, hostel_id, created_at, updated_at`,
+          [email, name, password, role, hostel_id ?? null]
+        );
+
+        const row = result.rows[0];
+        return {
+          id: row.id,
+          username: username || null,
+          email: row.email,
+          name: row.name,
+          password: row.password,
+          role: row.role,
+          hostel_id: row.hostel_id,
+          profile_picture: row.profile_picture ?? null,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        };
+      }
+
+      throw error;
+    }
   }
 
   static async findByEmail(email: string): Promise<User | null> {
