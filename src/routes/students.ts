@@ -809,7 +809,100 @@ router.delete('/:id', async (req: Request, res) => {
 
     await client.query('BEGIN');
     // End any active room assignment
-    await client.query("UPDATE student_room_assignments SET status = 'ended', ended_at = NOW() WHERE user_id = $1 AND status = 'active'", [id]);
+    const assignmentColumnsRes = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'student_room_assignments'
+    `);
+    const assignmentColumns = new Set<string>(assignmentColumnsRes.rows.map(row => row.column_name));
+    const assignmentUserIdColumn = assignmentColumns.has('student_id')
+      ? 'student_id'
+      : assignmentColumns.has('user_id')
+        ? 'user_id'
+        : null;
+    const statusColumn = assignmentColumns.has('status')
+      ? 'status'
+      : assignmentColumns.has('stay_status')
+        ? 'stay_status'
+        : null;
+    const isActiveColumn = assignmentColumns.has('is_active') ? 'is_active' : null;
+
+    if (assignmentUserIdColumn) {
+      const updateAssignments: string[] = [];
+      const queryParams: any[] = [id];
+      let nextParamIndex = 2;
+      let activeValues: string[] | null = null;
+      if (statusColumn) {
+        const statusValuesRes = await client.query(
+          `SELECT DISTINCT ${statusColumn} AS value
+           FROM student_room_assignments
+           WHERE ${statusColumn} IS NOT NULL
+           LIMIT 25`
+        );
+        const rawValues = statusValuesRes.rows.map((row) => String(row.value));
+        const lowerToRaw = new Map(rawValues.map((val) => [val.toLowerCase(), val]));
+
+        let endedValue: string | null = null;
+        if (lowerToRaw.has('ended')) {
+          endedValue = lowerToRaw.get('ended') || null;
+        } else if (lowerToRaw.has('inactive')) {
+          endedValue = lowerToRaw.get('inactive') || null;
+        } else if (lowerToRaw.has('completed')) {
+          endedValue = lowerToRaw.get('completed') || null;
+        } else if (lowerToRaw.size) {
+          const firstValue = lowerToRaw.values().next().value;
+          endedValue = typeof firstValue === 'string' ? firstValue : null;
+        }
+
+        if (endedValue) {
+          updateAssignments.push(`${statusColumn} = $${nextParamIndex++}`);
+          queryParams.push(endedValue);
+        }
+
+        const activeCandidates = rawValues.filter((val) =>
+          /active|assigned|pending/i.test(String(val))
+        );
+        if (activeCandidates.length) {
+          activeValues = Array.from(new Set(activeCandidates));
+        }
+      }
+      if (isActiveColumn) {
+        updateAssignments.push(`${isActiveColumn} = false`);
+      }
+      if (assignmentColumns.has('ended_at')) {
+        updateAssignments.push(`ended_at = NOW()`);
+      }
+      if (assignmentColumns.has('updated_at')) {
+        updateAssignments.push(`updated_at = NOW()`);
+      }
+
+      if (updateAssignments.length > 0) {
+        const conditions: string[] = [`${assignmentUserIdColumn} = $1`];
+        const conditionParams: any[] = [];
+        if (statusColumn && activeValues && activeValues.length) {
+          const activePlaceholders = activeValues
+            .map((val) => {
+              conditionParams.push(val);
+              return `$${nextParamIndex++}`;
+            })
+            .join(', ');
+          conditions.push(`${statusColumn} IN (${activePlaceholders})`);
+        }
+        if (isActiveColumn) {
+          conditions.push(`${isActiveColumn} = true`);
+        }
+
+        const updateSql = `
+          UPDATE student_room_assignments
+          SET ${updateAssignments.join(', ')}
+          WHERE ${conditions.join(' AND ')}
+        `;
+
+        await client.query(updateSql, [...queryParams, ...conditionParams]);
+      }
+    } else {
+      console.warn('[Students] Unable to determine user column in student_room_assignments; skipping assignment cleanup.');
+    }
     // Delete payments (optional): keep for audit; so we won't delete
     // Finally delete user
     await client.query('DELETE FROM users WHERE id = $1', [id]);

@@ -16,52 +16,62 @@ const getUserContext = (req: any) => {
 
 // Super Admin Analytics - Platform-wide statistics
 router.get('/platform/overview', async (req, res) => {
+  const client = await pool.connect();
   try {
-    const query = `
-      WITH active_assignments AS (
-        SELECT 
-          r.hostel_id,
-          COUNT(DISTINCT sra.id) as occupied_rooms_count
-        FROM student_room_assignments sra
-        JOIN rooms r ON sra.room_id = r.id
-        WHERE sra.status = 'active'
-        GROUP BY r.hostel_id
+    const [
+      totalUniversitiesRes,
+      totalHostelsRes,
+      totalStudentsRes,
+      totalHostelAdminsRes,
+      totalUniversityAdminsRes,
+      totalRoomsRes,
+      occupiedRoomsRes,
+    ] = await Promise.all([
+      client.query(`SELECT COUNT(*)::int AS total FROM universities WHERE status = 'active'`),
+      client.query(`SELECT COUNT(*)::int AS total FROM hostels`),
+      client.query(
+        `SELECT COUNT(*)::int AS total 
+         FROM users 
+         WHERE role = 'user' AND hostel_id IS NOT NULL`
       ),
-      hostel_occupancy AS (
-        SELECT
-          h.id,
-          h.total_rooms,
-          COALESCE(aa.occupied_rooms_count, 0) as occupied_rooms
-        FROM hostels h
-        LEFT JOIN active_assignments aa ON aa.hostel_id = h.id
-      )
-      SELECT 
-        (SELECT COUNT(*) FROM universities WHERE status = 'active') AS total_universities,
-        (SELECT COUNT(*) FROM hostels) AS total_hostels,
-        (SELECT COUNT(*) FROM users u WHERE u.role = 'user' AND u.hostel_id IN (SELECT id FROM hostels)) AS total_students,
-        (SELECT COUNT(*) FROM users WHERE role = 'hostel_admin') AS total_hostel_admins,
-        (SELECT COUNT(*) FROM users WHERE role = 'university_admin') AS total_university_admins,
-        COALESCE(SUM(ho.total_rooms), 0) AS total_rooms,
-        COALESCE(SUM(ho.total_rooms - ho.occupied_rooms), 0) AS available_rooms,
-        COALESCE(SUM(ho.occupied_rooms), 0) AS occupied_rooms,
-        CASE 
-          WHEN COALESCE(SUM(ho.total_rooms), 0) > 0 THEN 
-            ROUND((COALESCE(SUM(ho.occupied_rooms), 0)::numeric / COALESCE(SUM(ho.total_rooms), 0)::numeric) * 100, 2)
-          ELSE 0
-        END AS overall_occupancy_rate
-      FROM hostel_occupancy ho`;
-    const result = await pool.query(query);
-    
+      client.query(`SELECT COUNT(*)::int AS total FROM users WHERE role = 'hostel_admin'`),
+      client.query(`SELECT COUNT(*)::int AS total FROM users WHERE role = 'university_admin'`),
+      client.query(`SELECT COALESCE(SUM(total_rooms), 0)::int AS total FROM hostels`),
+      client.query(
+        `SELECT COALESCE(COUNT(DISTINCT room_id), 0)::int AS total 
+         FROM student_room_assignments 
+         WHERE status = 'active'`
+      ),
+    ]);
+
+    const totalRooms = totalRoomsRes.rows[0]?.total ?? 0;
+    const occupiedRooms = occupiedRoomsRes.rows[0]?.total ?? 0;
+    const availableRooms = Math.max(totalRooms - occupiedRooms, 0);
+    const occupancyRate =
+      totalRooms > 0 ? Number(((occupiedRooms / totalRooms) * 100).toFixed(2)) : 0;
+
     res.json({
       success: true,
-      data: result.rows[0]
+      data: {
+        total_universities: totalUniversitiesRes.rows[0]?.total ?? 0,
+        total_hostels: totalHostelsRes.rows[0]?.total ?? 0,
+        total_students: totalStudentsRes.rows[0]?.total ?? 0,
+        total_hostel_admins: totalHostelAdminsRes.rows[0]?.total ?? 0,
+        total_university_admins: totalUniversityAdminsRes.rows[0]?.total ?? 0,
+        total_rooms: totalRooms,
+        available_rooms: availableRooms,
+        occupied_rooms: occupiedRooms,
+        overall_occupancy_rate: occupancyRate,
+      },
     });
   } catch (error) {
     console.error('Get platform overview error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
     });
+  } finally {
+    client.release();
   }
 });
 

@@ -93,24 +93,151 @@ router.get('/summary', async (req, res) => {
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
 
-    const semesterId = req.query.semester_id ? Number(req.query.semester_id) : null;
-    const semesterFilter = semesterId ? 'AND semester_id = $2' : '';
-    const queryParams = semesterId ? [hostelId, semesterId] : [hostelId];
-    
-    const r = await pool.query(
-      `SELECT COALESCE(category, 'Uncategorized') AS category, SUM(amount)::numeric AS total
-       FROM expenses
-       WHERE hostel_id = $1 ${semesterFilter}
-       GROUP BY COALESCE(category, 'Uncategorized')
-       ORDER BY category ASC`,
-      queryParams
-    );
+    const columnsRes = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'expenses'
+    `);
+    const columnNames = columnsRes.rows.map(row => row.column_name);
+    const hasSemesterColumn = columnNames.includes('semester_id');
+    const categoryColumn = columnNames.includes('category') ? 'category' : null;
 
-    const total = r.rows.reduce((s, row) => s + parseFloat(row.total || 0), 0);
-    const items = r.rows.map(row => ({ category: row.category, total: parseFloat(row.total) }));
+    const semesterId = req.query.semester_id ? Number(req.query.semester_id) : null;
+    if (semesterId !== null && !hasSemesterColumn) {
+      return res.status(400).json({ success: false, message: 'Semester filtering is not supported because expenses.semester_id column is missing' });
+    }
+
+    const params: any[] = [hostelId];
+    let semesterClause = '';
+    if (semesterId !== null && hasSemesterColumn) {
+      params.push(semesterId);
+      semesterClause = `AND semester_id = $${params.length}`;
+    }
+
+    let total = 0;
+    let items: Array<{ category: string; total: number }> = [];
+
+    if (categoryColumn) {
+      const r = await pool.query(
+        `SELECT COALESCE(${categoryColumn}, 'Uncategorized') AS category, SUM(amount)::numeric AS total
+         FROM expenses
+         WHERE hostel_id = $1 ${semesterClause}
+         GROUP BY COALESCE(${categoryColumn}, 'Uncategorized')
+         ORDER BY category ASC`,
+        params
+      );
+      total = r.rows.reduce((s, row) => s + parseFloat(row.total || 0), 0);
+      items = r.rows.map(row => ({ category: row.category, total: parseFloat(row.total) }));
+    } else {
+      const r = await pool.query(
+        `SELECT SUM(amount)::numeric AS total
+         FROM expenses
+         WHERE hostel_id = $1 ${semesterClause}`,
+        params
+      );
+      total = parseFloat(r.rows[0]?.total || 0);
+      if (total > 0) {
+        items = [{ category: 'All Expenses', total }];
+      }
+    }
+
     res.json({ success: true, data: { total, items } });
   } catch (e) {
     console.error('Expenses summary error:', e);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+router.get('/summary/hostel', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian' && currentUser.role !== 'super_admin')) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    let hostelId = await getHostelId(currentUser.id, currentUser.role);
+    if (currentUser.role === 'super_admin' && req.query.hostel_id) {
+      hostelId = Number(req.query.hostel_id) || null;
+    }
+    if (!hostelId) return res.status(403).json({ success: false, message: 'Hostel scope required' });
+
+    const monthsParam = Number(req.query.months);
+    const months = Number.isFinite(monthsParam) && monthsParam > 0 ? Math.min(Math.trunc(monthsParam), 12) : 6;
+
+    const totalsRes = await pool.query(
+      `SELECT COALESCE(SUM(amount),0)::numeric AS total
+       FROM expenses
+       WHERE hostel_id = $1`,
+      [hostelId]
+    );
+    const totalExpenses = parseFloat(totalsRes.rows[0]?.total || 0);
+
+    const categoriesRes = await pool.query(
+      `SELECT COALESCE(category, 'Uncategorized') AS category,
+              COALESCE(SUM(amount),0)::numeric AS total
+       FROM expenses
+       WHERE hostel_id = $1
+       GROUP BY COALESCE(category, 'Uncategorized')
+       ORDER BY total DESC`,
+      [hostelId]
+    );
+    const categories = categoriesRes.rows.map((row) => ({
+      category: row.category,
+      total: parseFloat(row.total || 0),
+    }));
+
+    const trendRes = await pool.query(
+      `SELECT to_char(date_trunc('month', COALESCE(spent_at, created_at, CURRENT_DATE)), 'YYYY-MM') AS period,
+              COALESCE(SUM(amount),0)::numeric AS total
+       FROM expenses
+       WHERE hostel_id = $1
+         AND COALESCE(spent_at, created_at, CURRENT_DATE) >= date_trunc('month', CURRENT_DATE) - INTERVAL '${months - 1} month'
+       GROUP BY period
+       ORDER BY period ASC`,
+      [hostelId]
+    );
+    const trend = trendRes.rows.map((row) => ({
+      period: row.period,
+      total: parseFloat(row.total || 0),
+    }));
+
+    const recentRes = await pool.query(
+      `SELECT id, category, description, amount, currency, COALESCE(spent_at, created_at) AS timestamp
+       FROM expenses
+       WHERE hostel_id = $1
+       ORDER BY COALESCE(spent_at, created_at) DESC
+       LIMIT 5`,
+      [hostelId]
+    );
+    const recent = recentRes.rows.map((row) => ({
+      id: row.id,
+      category: row.category || 'Uncategorized',
+      description: row.description || '',
+      amount: parseFloat(row.amount || 0),
+      currency: row.currency || 'UGX',
+      timestamp: row.timestamp,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        totals: { amount: totalExpenses },
+        categories,
+        trend,
+        recent,
+      },
+    });
+  } catch (error) {
+    console.error('Hostel expenses summary error:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });

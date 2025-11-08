@@ -1,5 +1,4 @@
 import prisma from '../lib/prisma';
-import pool from '../config/database';
 import { User as PrismaUser, Prisma } from '@prisma/client';
 type PrismaUserUpdateInput = Prisma.UserUpdateInput;
 
@@ -12,7 +11,6 @@ export interface User {
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
   hostel_id?: number | null;
   profile_picture?: string | null;
-  password_is_temp?: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -24,17 +22,10 @@ export interface CreateUserData {
   password: string;
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
   hostel_id?: number;
-  password_is_temp?: boolean;
 }
 
 // Helper function to convert Prisma User to our User interface
 function prismaUserToUser(prismaUser: PrismaUser): User {
-  const prismaUserAny = prismaUser as any;
-  const passwordIsTemp =
-    prismaUserAny?.passwordIsTemp ??
-    prismaUserAny?.password_is_temp ??
-    false;
-
   return {
     id: prismaUser.id,
     username: prismaUser.username,
@@ -44,7 +35,6 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
     role: prismaUser.role as User['role'],
     hostel_id: prismaUser.hostelId,
     profile_picture: prismaUser.profilePicture,
-    password_is_temp: passwordIsTemp,
     created_at: prismaUser.createdAt,
     updated_at: prismaUser.updatedAt,
   };
@@ -52,70 +42,20 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
 
 export class UserModel {
   static async create(userData: CreateUserData): Promise<User> {
-    const { email, name, password, role, username, hostel_id, password_is_temp } = userData;
-
-    try {
-      const prismaCreateData: any = {
+    const { email, name, password, role, username, hostel_id } = userData;
+    
+    const prismaUser = await prisma.user.create({
+      data: {
         email,
         name,
         password,
         role,
         username: username || null,
         hostelId: hostel_id || null,
-      };
-
-      if (password_is_temp !== undefined) {
-        prismaCreateData.passwordIsTemp = password_is_temp;
-      }
-
-      const prismaUser = await prisma.user.create({
-        data: prismaCreateData,
-      });
-
-      return prismaUserToUser(prismaUser);
-    } catch (error: any) {
-      // Some deployments still use the legacy users table without Prisma-added columns
-      // (e.g., username/profile_picture). In that case, Prisma will throw because the
-      // column list in the generated INSERT does not match the table definition.
-      const errorMessage = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
-      const columnMismatch =
-        errorMessage.includes('column') &&
-        (errorMessage.includes('username') ||
-          errorMessage.includes('profile_picture') ||
-          errorMessage.includes('hostel_id') ||
-          errorMessage.includes('created_at'));
-
-      if (columnMismatch || error?.code === 'P2010') {
-        console.warn(
-          '[UserModel] Falling back to pool.query for user.create due to Prisma column mismatch',
-          error?.message || error
-        );
-
-        const result = await pool.query(
-          `INSERT INTO users (email, name, password, role, hostel_id, password_is_temp)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, email, name, password, role, hostel_id, password_is_temp, created_at, updated_at`,
-          [email, name, password, role, hostel_id ?? null, password_is_temp ?? false]
-        );
-
-        const row = result.rows[0];
-        return {
-          id: row.id,
-          username: username || null,
-          email: row.email,
-          name: row.name,
-          password: row.password,
-          role: row.role,
-          hostel_id: row.hostel_id,
-          profile_picture: row.profile_picture ?? null,
-          password_is_temp: row.password_is_temp ?? false,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        };
-      }
-
-      throw error;
-    }
+      },
+    });
+    
+    return prismaUserToUser(prismaUser);
   }
 
   static async findByEmail(email: string): Promise<User | null> {
@@ -175,6 +115,18 @@ export class UserModel {
   static async findById(id: number): Promise<User | null> {
     const prismaUser = await prisma.user.findUnique({
       where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        hostelId: true,
+        username: true,
+        profilePicture: true,
+        createdAt: true,
+        updatedAt: true,
+        password: false, // Don't return password by default
+      },
     });
     
     if (!prismaUser) return null;
@@ -219,13 +171,22 @@ export class UserModel {
       }
     }
     if (updateData.profile_picture !== undefined) prismaUpdateData.profilePicture = updateData.profile_picture || null;
-    if (updateData.password_is_temp !== undefined) {
-      (prismaUpdateData as any).passwordIsTemp = updateData.password_is_temp;
-    }
     
     const prismaUser = await prisma.user.update({
       where: { id },
       data: prismaUpdateData,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        hostelId: true,
+        username: true,
+        profilePicture: true,
+        createdAt: true,
+        updatedAt: true,
+        password: false,
+      },
     });
     
     return {
