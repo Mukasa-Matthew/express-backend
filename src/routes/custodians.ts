@@ -11,6 +11,19 @@ import { SimpleRateLimiter } from '../utils/rateLimiter';
 
 const router = express.Router();
 
+let custodianColumnsEnsured = false;
+async function ensureCustodianOptionalColumns() {
+  if (custodianColumnsEnsured) return;
+  try {
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS national_id_image_path TEXT`);
+    custodianColumnsEnsured = true;
+  } catch (err) {
+    console.warn('Failed to ensure optional custodian columns exist:', err);
+  }
+}
+
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), 'backend', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -30,6 +43,8 @@ const upload = multer({ storage });
 // List custodians for a hostel
 router.get('/', async (req, res) => {
   try {
+    await ensureCustodianOptionalColumns();
+
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) {
       return res.status(401).json({ success: false, message: 'No token provided' });
@@ -61,32 +76,15 @@ router.get('/', async (req, res) => {
     // Log for debugging
     console.log(`[Custodians] Fetching custodians for hostel_id: ${targetHostelId}, currentUser: ${currentUser.role} (${currentUser.id})`);
 
-    // Check if phone column exists in custodians table
-    const columnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'phone'
-    `);
-    
-    const hasPhoneColumn = columnCheck.rows.length > 0;
-    const hasLocationColumn = (await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'location'
-    `)).rows.length > 0;
-    const hasNationalIdColumn = (await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'national_id_image_path'
-    `)).rows.length > 0;
-    
-    // Build query with available columns
-    let selectColumns = ['c.id', 'u.name', 'u.email', 'c.status', 'c.created_at', 'c.hostel_id'];
-    if (hasPhoneColumn) selectColumns.push('c.phone');
-    if (hasLocationColumn) selectColumns.push('c.location');
-    if (hasNationalIdColumn) selectColumns.push('c.national_id_image_path');
-    
-    let query = `SELECT ${selectColumns.join(', ')}
+    let query = `SELECT c.id,
+       u.name,
+       u.email,
+       COALESCE(c.phone, NULL) AS phone,
+       COALESCE(c.location, NULL) AS location,
+       COALESCE(c.national_id_image_path, NULL) AS national_id_image_path,
+       c.status,
+       c.created_at,
+       c.hostel_id
        FROM custodians c
        JOIN users u ON u.id = c.user_id`;
     const params: any[] = [];
@@ -105,13 +103,13 @@ router.get('/', async (req, res) => {
     
     // Map results to ensure all expected fields exist
     const mappedRows = result.rows.map(row => {
-      const mapped = {
+      const mapped: any = {
         id: row.id,
         name: row.name || 'Unknown',
         email: row.email || null, // Ensure email is included
-        phone: row.phone || null,
-        location: row.location || null,
-        national_id_image_path: row.national_id_image_path || null,
+        phone: row.phone ?? null,
+        location: row.location ?? null,
+        national_id_image_path: row.national_id_image_path ?? null,
         status: row.status || 'active',
         created_at: row.created_at,
         hostel_id: row.hostel_id
@@ -177,6 +175,8 @@ router.get('/my-hostel', async (req: Request, res) => {
 router.post('/', upload.single('national_id_image'), async (req: Request, res) => {
   const client = await pool.connect();
   try {
+    await ensureCustodianOptionalColumns();
+
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) {
       return res.status(401).json({ success: false, message: 'No token provided' });
@@ -203,44 +203,10 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     if (!name || !email) {
       return res.status(400).json({ success: false, message: 'Missing required fields: name and email are required' });
     }
-    
-    // Ensure optional columns exist for legacy databases
-    await pool
-      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`)
-      .catch((err) => console.warn('Failed ensuring custodians.phone column:', err?.message || err));
-    await pool
-      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`)
-      .catch((err) => console.warn('Failed ensuring custodians.location column:', err?.message || err));
-    await pool
-      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS national_id_image_path TEXT`)
-      .catch((err) => console.warn('Failed ensuring custodians.national_id_image_path column:', err?.message || err));
-
-    // Check which columns exist in custodians table (do this once and reuse)
-    const phoneCheckResult = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'phone'
-    `);
-    const locationCheckResult = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'location'
-    `);
-    const nationalIdCheckResult = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'national_id_image_path'
-    `);
-    
-    const hasPhoneColumn = phoneCheckResult.rows.length > 0;
-    const hasLocationColumn = locationCheckResult.rows.length > 0;
-    const hasNationalIdColumn = nationalIdCheckResult.rows.length > 0;
-    
-    // Only validate phone/location if the columns exist
-    if (hasPhoneColumn && !phone) {
+    if (!phone) {
       return res.status(400).json({ success: false, message: 'Phone number is required' });
     }
-    if (hasLocationColumn && !location) {
+    if (!location) {
       return res.status(400).json({ success: false, message: 'Location is required' });
     }
 
@@ -382,10 +348,10 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     // Insert custodian profile
     const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
     const custodianInsert = await client.query(
-      `INSERT INTO custodians (${insertColumns.join(', ')})
-       VALUES (${placeholders})
+      `INSERT INTO custodians (user_id, hostel_id, phone, location, national_id_image_path)
+       VALUES ($1,$2,$3,$4,$5)
        RETURNING id`,
-      insertValues
+      [userId, targetHostelId, phone || null, location || null, nationalIdPath]
     );
 
     const custodianId = custodianInsert.rows[0]?.id || null;
@@ -509,6 +475,8 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
 // Update custodian (name, phone, location, status)
 router.put('/:id', async (req: Request, res) => {
   try {
+    await ensureCustodianOptionalColumns();
+
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
     const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
@@ -531,40 +499,17 @@ router.put('/:id', async (req: Request, res) => {
 
     if (name) await pool.query('UPDATE users SET name = $1 WHERE id = (SELECT user_id FROM custodians WHERE id = $2)', [name, id]);
 
-    // Ensure optional columns exist for legacy databases
-    await pool
-      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`)
-      .catch((err) => console.warn('Failed ensuring custodians.phone column:', err?.message || err));
-    await pool
-      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`)
-      .catch((err) => console.warn('Failed ensuring custodians.location column:', err?.message || err));
-
-    // Check which columns exist before updating
-    const phoneCheckUpdate = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'phone'
-    `);
-    const locationCheckUpdate = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'custodians' AND column_name = 'location'
-    `);
-    
-    const hasPhoneCol = phoneCheckUpdate.rows.length > 0;
-    const hasLocationCol = locationCheckUpdate.rows.length > 0;
-    
     // Build dynamic UPDATE query
     const updateParts: string[] = [];
     const updateValues: any[] = [];
     
-    if (hasPhoneCol && phone !== undefined) {
+    if (phone !== undefined) {
       updateParts.push('phone = $' + (updateValues.length + 1));
-      updateValues.push(phone);
+      updateValues.push(phone || null);
     }
-    if (hasLocationCol && location !== undefined) {
+    if (location !== undefined) {
       updateParts.push('location = $' + (updateValues.length + 1));
-      updateValues.push(location);
+      updateValues.push(location || null);
     }
     if (status !== undefined) {
       updateParts.push('status = $' + (updateValues.length + 1));
@@ -573,10 +518,11 @@ router.put('/:id', async (req: Request, res) => {
     
     if (updateParts.length > 0) {
       updateValues.push(id);
-    await pool.query(
+      updateParts.push('updated_at = NOW()');
+      await pool.query(
         `UPDATE custodians SET ${updateParts.join(', ')} WHERE id = $${updateValues.length}`,
         updateValues
-    );
+      );
     }
 
     res.json({ success: true, message: 'Custodian updated successfully' });
