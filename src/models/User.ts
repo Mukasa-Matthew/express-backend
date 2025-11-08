@@ -29,6 +29,12 @@ export interface CreateUserData {
 
 // Helper function to convert Prisma User to our User interface
 function prismaUserToUser(prismaUser: PrismaUser): User {
+  const prismaUserAny = prismaUser as any;
+  const passwordIsTemp =
+    prismaUserAny?.passwordIsTemp ??
+    prismaUserAny?.password_is_temp ??
+    false;
+
   return {
     id: prismaUser.id,
     username: prismaUser.username,
@@ -38,7 +44,7 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
     role: prismaUser.role as User['role'],
     hostel_id: prismaUser.hostelId,
     profile_picture: prismaUser.profilePicture,
-    password_is_temp: prismaUser.passwordIsTemp ?? false,
+    password_is_temp: passwordIsTemp,
     created_at: prismaUser.createdAt,
     updated_at: prismaUser.updatedAt,
   };
@@ -49,16 +55,21 @@ export class UserModel {
     const { email, name, password, role, username, hostel_id, password_is_temp } = userData;
 
     try {
+      const prismaCreateData: any = {
+        email,
+        name,
+        password,
+        role,
+        username: username || null,
+        hostelId: hostel_id || null,
+      };
+
+      if (password_is_temp !== undefined) {
+        prismaCreateData.passwordIsTemp = password_is_temp;
+      }
+
       const prismaUser = await prisma.user.create({
-        data: {
-          email,
-          name,
-          password,
-          role,
-          username: username || null,
-          hostelId: hostel_id || null,
-          passwordIsTemp: password_is_temp ?? false,
-        },
+        data: prismaCreateData,
       });
 
       return prismaUserToUser(prismaUser);
@@ -164,19 +175,6 @@ export class UserModel {
   static async findById(id: number): Promise<User | null> {
     const prismaUser = await prisma.user.findUnique({
       where: { id },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        hostelId: true,
-        username: true,
-        profilePicture: true,
-        passwordIsTemp: true,
-        createdAt: true,
-        updatedAt: true,
-        password: false, // Don't return password by default
-      },
     });
     
     if (!prismaUser) return null;
@@ -221,23 +219,13 @@ export class UserModel {
       }
     }
     if (updateData.profile_picture !== undefined) prismaUpdateData.profilePicture = updateData.profile_picture || null;
-    if (updateData.password_is_temp !== undefined) prismaUpdateData.passwordIsTemp = updateData.password_is_temp;
+    if (updateData.password_is_temp !== undefined) {
+      (prismaUpdateData as any).passwordIsTemp = updateData.password_is_temp;
+    }
     
     const prismaUser = await prisma.user.update({
       where: { id },
       data: prismaUpdateData,
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        hostelId: true,
-        username: true,
-        profilePicture: true,
-        createdAt: true,
-        updatedAt: true,
-        password: false,
-      },
     });
     
     return {
