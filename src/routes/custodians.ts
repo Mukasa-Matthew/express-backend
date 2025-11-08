@@ -24,6 +24,19 @@ async function ensureCustodianOptionalColumns() {
   }
 }
 
+const normalizeStringField = (value: any): string | null => {
+  if (value === undefined || value === null) return null;
+  let str = value;
+  if (Array.isArray(value)) {
+    str = value[0];
+  }
+  if (typeof str !== 'string') {
+    str = String(str ?? '');
+  }
+  const trimmed = str.trim();
+  return trimmed.length ? trimmed : null;
+};
+
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), 'backend', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
