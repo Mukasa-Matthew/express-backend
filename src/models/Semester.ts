@@ -62,13 +62,47 @@ export interface SemesterStats {
 }
 
 export class GlobalSemesterModel {
+  private static async ensureTableExists(): Promise<void> {
+    const tableExists = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = 'global_semesters'
+      ) AS exists
+    `);
+
+    if (!tableExists.rows[0]?.exists) {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS global_semesters (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL UNIQUE,
+          description TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+        )
+      `);
+    }
+
+    await pool.query(`
+      ALTER TABLE global_semesters
+      ADD COLUMN IF NOT EXISTS description TEXT,
+      ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+    `);
+  }
+
   /**
    * Create a new global semester template
    */
   static async create(globalSemesterData: CreateGlobalSemesterData): Promise<GlobalSemester> {
+    await this.ensureTableExists();
+
     const result = await pool.query(
-      `INSERT INTO global_semesters (name, description)
-       VALUES ($1, $2)
+      `INSERT INTO global_semesters (name, description, is_active)
+       VALUES ($1, $2, TRUE)
        RETURNING *`,
       [globalSemesterData.name, globalSemesterData.description || null]
     );
@@ -79,6 +113,8 @@ export class GlobalSemesterModel {
    * Find all global semesters
    */
   static async findAll(): Promise<GlobalSemester[]> {
+    await this.ensureTableExists();
+
     const result = await pool.query(
       'SELECT * FROM global_semesters ORDER BY name ASC'
     );
@@ -89,6 +125,8 @@ export class GlobalSemesterModel {
    * Find global semester by ID
    */
   static async findById(id: number): Promise<GlobalSemester | null> {
+    await this.ensureTableExists();
+
     const result = await pool.query('SELECT * FROM global_semesters WHERE id = $1', [id]);
     return result.rows[0] || null;
   }
@@ -97,6 +135,8 @@ export class GlobalSemesterModel {
    * Update global semester
    */
   static async update(id: number, updates: Partial<GlobalSemester>): Promise<GlobalSemester | null> {
+    await this.ensureTableExists();
+
     const fields = Object.keys(updates).filter(key => key !== 'id' && key !== 'created_at' && key !== 'updated_at');
     const values = fields.map(field => updates[field as keyof GlobalSemester]);
     const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ');
@@ -114,6 +154,8 @@ export class GlobalSemesterModel {
    * Delete (hard delete) global semester
    */
   static async delete(id: number): Promise<boolean> {
+    await this.ensureTableExists();
+
     const result = await pool.query(
       'DELETE FROM global_semesters WHERE id = $1',
       [id]
@@ -123,10 +165,53 @@ export class GlobalSemesterModel {
 }
 
 export class SemesterModel {
+  private static async ensureTableColumns(): Promise<void> {
+    const columnCheck = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'semesters'
+    `);
+
+    if (columnCheck.rowCount === 0) {
+      throw new Error('semesters table does not exist');
+    }
+
+    const columns = columnCheck.rows.map((row) => row.column_name);
+    const alterations: string[] = [];
+
+    if (!columns.includes('global_semester_id')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS global_semester_id INTEGER REFERENCES global_semesters(id) ON DELETE SET NULL`);
+    }
+    if (!columns.includes('status')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS status VARCHAR(50) NOT NULL DEFAULT 'upcoming'`);
+    }
+    if (!columns.includes('is_current')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT FALSE`);
+    }
+    if (!columns.includes('created_at')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()`);
+    }
+    if (!columns.includes('updated_at')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()`);
+    }
+    if (!columns.includes('academic_year')) {
+      alterations.push(`ADD COLUMN IF NOT EXISTS academic_year VARCHAR(20)`);
+    }
+
+    if (alterations.length > 0) {
+      await pool.query(`
+        ALTER TABLE semesters
+        ${alterations.join(', ')}
+      `);
+    }
+  }
+
   /**
    * Create a new semester for a hostel
    */
   static async create(semesterData: CreateSemesterData): Promise<Semester> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       `INSERT INTO semesters (hostel_id, global_semester_id, name, academic_year, start_date, end_date, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'upcoming')
@@ -147,6 +232,8 @@ export class SemesterModel {
    * Find semester by ID
    */
   static async findById(id: number): Promise<Semester | null> {
+    await this.ensureTableColumns();
+
     const result = await pool.query('SELECT * FROM semesters WHERE id = $1', [id]);
     return result.rows[0] || null;
   }
@@ -155,6 +242,8 @@ export class SemesterModel {
    * Find all semesters for a hostel
    */
   static async findByHostelId(hostelId: number): Promise<Semester[]> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       'SELECT * FROM semesters WHERE hostel_id = $1 ORDER BY start_date DESC',
       [hostelId]
@@ -166,6 +255,8 @@ export class SemesterModel {
    * Find current active semester for a hostel
    */
   static async findCurrentByHostelId(hostelId: number): Promise<Semester | null> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       `SELECT * FROM semesters 
        WHERE hostel_id = $1 AND is_current = true AND status = 'active'
@@ -179,6 +270,8 @@ export class SemesterModel {
    * Get upcoming semesters for a hostel
    */
   static async findUpcomingByHostelId(hostelId: number): Promise<Semester[]> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       `SELECT * FROM semesters 
        WHERE hostel_id = $1 AND status = 'upcoming'
@@ -192,6 +285,8 @@ export class SemesterModel {
    * Set a semester as current (automatically unsets others)
    */
   static async setAsCurrent(semesterId: number, hostelId: number): Promise<boolean> {
+    await this.ensureTableColumns();
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -222,6 +317,8 @@ export class SemesterModel {
    * Update semester status
    */
   static async updateStatus(id: number, status: Semester['status']): Promise<boolean> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       'UPDATE semesters SET status = $1, updated_at = NOW() WHERE id = $2',
       [status, id]
@@ -233,6 +330,8 @@ export class SemesterModel {
    * Delete a semester
    */
   static async delete(id: number): Promise<boolean> {
+    await this.ensureTableColumns();
+
     const result = await pool.query('DELETE FROM semesters WHERE id = $1', [id]);
     return (result.rowCount || 0) > 0;
   }
@@ -241,6 +340,8 @@ export class SemesterModel {
    * Get semester statistics
    */
   static async getStatistics(semesterId: number): Promise<SemesterStats | null> {
+    await this.ensureTableColumns();
+
     const result = await pool.query(
       `SELECT 
         s.id as semester_id,

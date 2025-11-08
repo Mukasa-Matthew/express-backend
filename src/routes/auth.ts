@@ -355,23 +355,39 @@ router.post('/change-password', async (req, res) => {
     
     console.log(`[Change Password] Password successfully updated and verified for user: ${user.email} (ID: ${decoded.userId})`);
 
-    // Send confirmation email
-    try {
-      const emailHtml = EmailService.generatePasswordChangeConfirmationEmail(
-        user.name,
-        user.email,
-        new Date().toLocaleString()
-      );
+    // Mark password as permanent and clear any stored temporary credentials
+    await pool.query('UPDATE users SET password_is_temp = FALSE WHERE id = $1', [decoded.userId]);
+    if (user.role === 'custodian') {
+      try {
+        await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS original_username TEXT`);
+        await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS original_password TEXT`);
+        await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS credentials_invalidated BOOLEAN DEFAULT FALSE`);
+        await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS credentials_invalidated_at TIMESTAMPTZ`);
+      } catch (alterErr) {
+        console.warn('Failed to ensure custodian credential columns during password change:', alterErr);
+      }
 
-      await EmailService.sendEmail({
-        to: user.email,
-        subject: 'Password Changed - LTS Portal',
-        html: emailHtml
-      });
-    } catch (emailError) {
-      console.error('Error sending password change confirmation email:', emailError);
-      // Don't fail the request if email fails
+      await pool.query(
+        `UPDATE custodians
+            SET original_password = NULL,
+                credentials_invalidated = TRUE,
+                credentials_invalidated_at = NOW()
+         WHERE user_id = $1`,
+        [decoded.userId]
+      );
     }
+
+    // Send confirmation email asynchronously (don't block response)
+    const emailHtml = EmailService.generatePasswordChangeConfirmationEmail(
+      user.name,
+      user.email,
+      new Date().toLocaleString()
+    );
+    EmailService.sendEmailAsync({
+      to: user.email,
+      subject: 'Password Changed - LTS Portal',
+      html: emailHtml
+    });
 
     res.json({
       success: true,

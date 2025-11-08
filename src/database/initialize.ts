@@ -330,6 +330,23 @@ async function ensureSchemaMatches(): Promise<void> {
       `);
       console.log('✅ Added profile_picture column to users table');
     }
+
+    const passwordIsTempCheck = await tempPool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      AND table_name = 'users' 
+      AND column_name = 'password_is_temp'
+    `);
+
+    if (passwordIsTempCheck.rows.length === 0) {
+      console.log('📝 Adding missing password_is_temp column to users table...');
+      await tempPool.query(`
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS password_is_temp BOOLEAN DEFAULT FALSE
+      `);
+      console.log('✅ Added password_is_temp column to users table');
+    }
     
     console.log('✅ Database schema check completed');
   } catch (error: any) {

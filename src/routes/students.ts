@@ -152,23 +152,129 @@ router.post('/', async (req: Request, res) => {
     }
 
     // Create or update profile
-    const existingProfile = await client.query('SELECT user_id FROM student_profiles WHERE user_id = $1', [createdUser.id]);
-    if (existingProfile.rowCount === 0) {
-      await client.query(
-        `INSERT INTO student_profiles (user_id, gender, date_of_birth, access_number, phone, whatsapp, emergency_contact)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [createdUser.id, gender || null, date_of_birth || null, access_number || null, phone || null, whatsapp || null, emergency_contact || null]
-      );
+    // Determine whether to use student_profiles or students table for profile data
+    const tableExistsCheck = await client.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN ('student_profiles', 'students')
+    `);
+    const hasStudentProfilesTable = tableExistsCheck.rows.some(row => row.table_name === 'student_profiles');
+    const hasStudentsTable = tableExistsCheck.rows.some(row => row.table_name === 'students');
+
+    if (hasStudentProfilesTable) {
+      const profileExists = await client.query('SELECT user_id FROM student_profiles WHERE user_id = $1', [createdUser.id]);
+      if (profileExists.rowCount === 0) {
+        await client.query(
+          `INSERT INTO student_profiles (user_id, gender, date_of_birth, access_number, phone, whatsapp, emergency_contact)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [createdUser.id, gender || null, date_of_birth || null, access_number || null, phone || null, whatsapp || null, emergency_contact || null]
+        );
+      } else {
+        await client.query(
+          `UPDATE student_profiles 
+           SET gender = COALESCE($2, gender), date_of_birth = COALESCE($3, date_of_birth), 
+               access_number = COALESCE($4, access_number), phone = COALESCE($5, phone),
+               whatsapp = COALESCE($6, whatsapp), emergency_contact = COALESCE($7, emergency_contact),
+               updated_at = NOW()
+           WHERE user_id = $1`,
+          [createdUser.id, gender || null, date_of_birth || null, access_number || null, phone || null, whatsapp || null, emergency_contact || null]
+        );
+      }
+    } else if (hasStudentsTable) {
+      const columnsRes = await client.query(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'students'
+      `);
+      const studentColumns = new Set(columnsRes.rows.map((row) => row.column_name));
+
+      const baseColumns = ['user_id'];
+      const baseValues: any[] = [createdUser.id];
+      const basePlaceholders = ['$1'];
+      let paramIndex = 2;
+
+      const addColumnIfExists = (column: string, value: any) => {
+        if (studentColumns.has(column)) {
+          baseColumns.push(column);
+          baseValues.push(value);
+          basePlaceholders.push(`$${paramIndex++}`);
+        }
+      };
+
+      const valuesForUpdate: Record<string, any> = {};
+
+      addColumnIfExists('registration_number', req.body.registration_number || `REG-${createdUser.id}`);
+      valuesForUpdate['registration_number'] = req.body.registration_number || `REG-${createdUser.id}`;
+
+      addColumnIfExists('gender', gender || null);
+      valuesForUpdate['gender'] = gender || null;
+
+      addColumnIfExists('date_of_birth', date_of_birth || null);
+      valuesForUpdate['date_of_birth'] = date_of_birth || null;
+
+      addColumnIfExists('access_number', access_number || null);
+      valuesForUpdate['access_number'] = access_number || null;
+
+      addColumnIfExists('phone_number', phone || null);
+      valuesForUpdate['phone_number'] = phone || null;
+
+      addColumnIfExists('phone', phone || null);
+      valuesForUpdate['phone'] = phone || null;
+
+      addColumnIfExists('whatsapp', whatsapp || null);
+      valuesForUpdate['whatsapp'] = whatsapp || null;
+
+      addColumnIfExists('emergency_contact', emergency_contact || null);
+      valuesForUpdate['emergency_contact'] = emergency_contact || null;
+
+      if (studentColumns.has('created_at')) {
+        baseColumns.push('created_at');
+        baseValues.push(new Date());
+        basePlaceholders.push(`$${paramIndex++}`);
+      }
+
+      if (studentColumns.has('updated_at')) {
+        baseColumns.push('updated_at');
+        baseValues.push(new Date());
+        basePlaceholders.push(`$${paramIndex++}`);
+      }
+
+      const studentExists = await client.query('SELECT user_id FROM students WHERE user_id = $1', [createdUser.id]);
+      if (studentExists.rowCount === 0) {
+        await client.query(
+          `INSERT INTO students (${baseColumns.join(', ')})
+           VALUES (${basePlaceholders.join(', ')})`,
+          baseValues
+        );
+      } else {
+        const updateAssignments: string[] = [];
+        const updateValues: any[] = [createdUser.id];
+        let updateParamIndex = 2;
+
+        Object.entries(valuesForUpdate).forEach(([column, value]) => {
+          if (studentColumns.has(column)) {
+            updateAssignments.push(`${column} = COALESCE($${updateParamIndex}, ${column})`);
+            updateValues.push(value);
+            updateParamIndex++;
+          }
+        });
+
+        if (studentColumns.has('updated_at')) {
+          updateAssignments.push(`updated_at = NOW()`);
+        }
+
+        if (updateAssignments.length > 0) {
+          await client.query(
+            `UPDATE students 
+             SET ${updateAssignments.join(', ')}
+             WHERE user_id = $1`,
+            updateValues
+          );
+        }
+      }
     } else {
-      await client.query(
-        `UPDATE student_profiles 
-         SET gender = COALESCE($2, gender), date_of_birth = COALESCE($3, date_of_birth), 
-             access_number = COALESCE($4, access_number), phone = COALESCE($5, phone),
-             whatsapp = COALESCE($6, whatsapp), emergency_contact = COALESCE($7, emergency_contact),
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [createdUser.id, gender || null, date_of_birth || null, access_number || null, phone || null, whatsapp || null, emergency_contact || null]
-      );
+      console.warn('Neither student_profiles nor students table exists; skipping profile persistence.');
     }
 
     // Store room metadata for email and enrollments
@@ -176,6 +282,24 @@ router.post('/', async (req: Request, res) => {
     
     // Assign room if provided
     if (room_id) {
+      const assignmentColumnsRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'student_room_assignments'
+      `);
+      const assignmentColumns = new Set<string>(assignmentColumnsRes.rows.map(row => row.column_name));
+      const assignmentUserIdColumn = assignmentColumns.has('student_id')
+        ? 'student_id'
+        : assignmentColumns.has('user_id')
+          ? 'user_id'
+          : null;
+      const assignmentStatusColumn = assignmentColumns.has('status') ? 'status' : null;
+      const assignmentUpdatedAtColumn = assignmentColumns.has('updated_at') ? 'updated_at' : null;
+      const assignmentSemesterColumn = assignmentColumns.has('semester_id') ? 'semester_id' : null;
+
+      if (!assignmentUserIdColumn) {
+        console.warn('[Students] student_room_assignments missing user identifier column; skipping room assignment');
+      } else {
       const roomCheck = await client.query(`
         SELECT r.id, r.price, r.room_number, r.capacity, r.status,
                COALESCE(COUNT(sra.id), 0) as current_occupants
@@ -185,67 +309,269 @@ router.post('/', async (req: Request, res) => {
         GROUP BY r.id
       `, [room_id, hostelId]);
       
-      if (!roomCheck.rowCount) {
+        if (!roomCheck.rowCount) {
         await client.query('ROLLBACK');
         return res.status(400).json({ success: false, message: 'Invalid room' });
-      }
+        }
       
-      const room = roomCheck.rows[0];
-      const capacity = room.capacity || 1;
-      const currentOccupants = parseInt(room.current_occupants) || 0;
+        const room = roomCheck.rows[0];
+        const capacity = room.capacity || 1;
+        const currentOccupants = parseInt(room.current_occupants) || 0;
       
-      // Check if room has available capacity
-      if (currentOccupants >= capacity) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, message: 'This room is already at full capacity' });
-      }
+        // Check if room has available capacity
+        if (currentOccupants >= capacity) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ success: false, message: 'This room is already at full capacity' });
+        }
       
-      roomMeta = { room_number: room.room_number, price: parseFloat(room.price) };
+        roomMeta = { room_number: room.room_number, price: parseFloat(room.price) };
       
-      // Check if student already has an active assignment for this semester
-      const existingAssignment = await client.query(
-        `SELECT id FROM student_room_assignments WHERE user_id = $1 AND semester_id = $2 AND status = 'active'`,
-        [createdUser.id, semesterId]
-      );
-      
-      if (existingAssignment.rowCount === 0) {
-        // Create new room assignment
-        await client.query(
-          `INSERT INTO student_room_assignments (user_id, room_id, semester_id, status) VALUES ($1, $2, $3, 'active')`,
-          [createdUser.id, room_id, semesterId]
+        // Check if student already has an active assignment for this semester
+        const activeAssignmentConditions: string[] = [`${assignmentUserIdColumn} = $1`];
+        const activeAssignmentParams: any[] = [createdUser.id];
+        let assignmentParamIndex = 2;
+        if (assignmentSemesterColumn) {
+          activeAssignmentConditions.push(`${assignmentSemesterColumn} = $${assignmentParamIndex}`);
+          activeAssignmentParams.push(semesterId);
+          assignmentParamIndex++;
+        }
+        if (assignmentStatusColumn) {
+          activeAssignmentConditions.push(`${assignmentStatusColumn} = 'active'`);
+        }
+        const existingAssignment = await client.query(
+          `SELECT id FROM student_room_assignments WHERE ${activeAssignmentConditions.join(' AND ')}`,
+          activeAssignmentParams
         );
-      } else {
-        // Update existing assignment
-        await client.query(
-          `UPDATE student_room_assignments SET room_id = $1, updated_at = NOW() WHERE id = $2`,
-          [room_id, existingAssignment.rows[0].id]
-        );
-      }
       
-      // Mark room as occupied only if it's single occupancy (capacity = 1)
-      if (room.status === 'available' && capacity === 1) {
-        await client.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = $1", [room_id]);
+        if (existingAssignment.rowCount === 0) {
+          // Create new room assignment
+          const assignmentInsertColumns: string[] = [assignmentUserIdColumn];
+          const assignmentInsertPlaceholders: string[] = ['$1'];
+          const assignmentInsertValues: any[] = [createdUser.id];
+          let insertIndex = 2;
+
+          if (assignmentColumns.has('room_id')) {
+            assignmentInsertColumns.push('room_id');
+            assignmentInsertPlaceholders.push(`$${insertIndex++}`);
+            assignmentInsertValues.push(room_id);
+          }
+          if (assignmentSemesterColumn) {
+            assignmentInsertColumns.push(assignmentSemesterColumn);
+            assignmentInsertPlaceholders.push(`$${insertIndex++}`);
+            assignmentInsertValues.push(semesterId);
+          }
+          if (assignmentStatusColumn) {
+            assignmentInsertColumns.push(assignmentStatusColumn);
+            assignmentInsertPlaceholders.push(`$${insertIndex++}`);
+            assignmentInsertValues.push('active');
+          }
+          if (assignmentColumns.has('created_at')) {
+            assignmentInsertColumns.push('created_at');
+            assignmentInsertPlaceholders.push(`$${insertIndex++}`);
+            assignmentInsertValues.push(new Date());
+          }
+          if (assignmentUpdatedAtColumn) {
+            assignmentInsertColumns.push(assignmentUpdatedAtColumn);
+            assignmentInsertPlaceholders.push(`$${insertIndex++}`);
+            assignmentInsertValues.push(new Date());
+          }
+
+          await client.query(
+            `INSERT INTO student_room_assignments (${assignmentInsertColumns.join(', ')})
+             VALUES (${assignmentInsertPlaceholders.join(', ')})`,
+            assignmentInsertValues
+          );
+        } else {
+          // Update existing assignment
+          const assignmentUpdateSets: string[] = [];
+          const assignmentUpdateValues: any[] = [];
+          let updateIndex = 1;
+
+          if (assignmentColumns.has('room_id')) {
+            assignmentUpdateSets.push(`room_id = $${updateIndex++}`);
+            assignmentUpdateValues.push(room_id);
+          }
+          if (assignmentUpdatedAtColumn) {
+            assignmentUpdateSets.push(`${assignmentUpdatedAtColumn} = NOW()`);
+          }
+
+          if (assignmentUpdateSets.length > 0) {
+            assignmentUpdateValues.push(existingAssignment.rows[0].id);
+            await client.query(
+              `UPDATE student_room_assignments SET ${assignmentUpdateSets.join(', ')} WHERE id = $${updateIndex}`,
+              assignmentUpdateValues
+            );
+          }
+        }
+      
+        // Mark room as occupied only if it's single occupancy (capacity = 1)
+        if (room.status === 'available' && capacity === 1) {
+          await client.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = $1", [room_id]);
+        }
       }
     }
 
     // Create semester enrollment for this student
-    await client.query(
-      `INSERT INTO semester_enrollments (semester_id, user_id, room_id, enrollment_status)
-       VALUES ($1, $2, $3, 'active')
-       ON CONFLICT (semester_id, user_id) 
-       DO UPDATE SET enrollment_status = 'active', updated_at = NOW()
-       RETURNING *`,
-      [semesterId, createdUser.id, room_id || null]
-    );
+    const enrollmentColumnsRes = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'semester_enrollments'
+    `);
+    const enrollmentColumns = new Set<string>(enrollmentColumnsRes.rows.map(row => row.column_name));
+    const enrollmentUserIdColumn = enrollmentColumns.has('student_id')
+      ? 'student_id'
+      : enrollmentColumns.has('user_id')
+        ? 'user_id'
+        : null;
+    const enrollmentStatusColumn = enrollmentColumns.has('enrollment_status')
+      ? 'enrollment_status'
+      : enrollmentColumns.has('status')
+        ? 'status'
+        : null;
+    const enrollmentRoomColumn = enrollmentColumns.has('room_id') ? 'room_id' : null;
+    const enrollmentUpdatedAtColumn = enrollmentColumns.has('updated_at') ? 'updated_at' : null;
+    const enrollmentCreatedAtColumn = enrollmentColumns.has('created_at') ? 'created_at' : null;
+
+    if (!enrollmentUserIdColumn) {
+      console.warn('[Students] semester_enrollments missing user identifier column; skipping enrollment creation');
+    } else {
+      const enrollmentInsertColumns: string[] = ['semester_id', enrollmentUserIdColumn];
+      const enrollmentInsertPlaceholders: string[] = ['$1', '$2'];
+      const enrollmentValues: any[] = [semesterId, createdUser.id];
+      let enrollmentIndex = 3;
+
+      if (enrollmentRoomColumn) {
+        enrollmentInsertColumns.push(enrollmentRoomColumn);
+        enrollmentInsertPlaceholders.push(`$${enrollmentIndex++}`);
+        enrollmentValues.push(room_id || null);
+      }
+      if (enrollmentStatusColumn) {
+        enrollmentInsertColumns.push(enrollmentStatusColumn);
+        enrollmentInsertPlaceholders.push(`$${enrollmentIndex++}`);
+        enrollmentValues.push('active');
+      }
+      if (enrollmentCreatedAtColumn) {
+        enrollmentInsertColumns.push(enrollmentCreatedAtColumn);
+        enrollmentInsertPlaceholders.push(`$${enrollmentIndex++}`);
+        enrollmentValues.push(new Date());
+      }
+      if (enrollmentUpdatedAtColumn) {
+        enrollmentInsertColumns.push(enrollmentUpdatedAtColumn);
+        enrollmentInsertPlaceholders.push(`$${enrollmentIndex++}`);
+        enrollmentValues.push(new Date());
+      }
+
+      const conflictColumnList = enrollmentColumns.has('semester_id')
+        ? `semester_id, ${enrollmentUserIdColumn}`
+        : `${enrollmentUserIdColumn}`;
+
+      const updateAssignments: string[] = [];
+      const updateValues: any[] = [];
+      if (enrollmentStatusColumn) {
+        updateAssignments.push(`${enrollmentStatusColumn} = 'active'`);
+      }
+      if (enrollmentRoomColumn) {
+        updateAssignments.push(`${enrollmentRoomColumn} = EXCLUDED.${enrollmentRoomColumn}`);
+      }
+      if (enrollmentUpdatedAtColumn) {
+        updateAssignments.push(`${enrollmentUpdatedAtColumn} = NOW()`);
+      }
+
+      const upsertQuery = updateAssignments.length > 0 && enrollmentColumns.has('semester_id')
+        ? `
+        INSERT INTO semester_enrollments (${enrollmentInsertColumns.join(', ')})
+        VALUES (${enrollmentInsertPlaceholders.join(', ')})
+        ON CONFLICT (${conflictColumnList})
+        DO UPDATE SET ${updateAssignments.join(', ')}
+        RETURNING *
+      `
+        : `
+        INSERT INTO semester_enrollments (${enrollmentInsertColumns.join(', ')})
+        VALUES (${enrollmentInsertPlaceholders.join(', ')})
+        RETURNING *
+      `;
+
+      await client.query(upsertQuery, enrollmentValues.concat(updateValues));
+    }
 
     // Record initial payment if provided
     let initialPayment = 0;
     if (initial_payment_amount) {
       initialPayment = parseFloat(initial_payment_amount);
-      await client.query(
-        `INSERT INTO payments (user_id, hostel_id, semester_id, amount, currency, purpose) VALUES ($1, $2, $3, $4, $5, 'booking')`,
-        [createdUser.id, hostelId, semesterId, initialPayment, currency || 'UGX']
-      );
+      if (!Number.isFinite(initialPayment) || initialPayment <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, message: 'Initial payment amount is invalid' });
+      }
+
+      const paymentsColumnsRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'payments'
+      `);
+      const paymentColumns = new Set<string>(paymentsColumnsRes.rows.map(row => row.column_name));
+
+      const paymentUserIdColumn = paymentColumns.has('student_id')
+        ? 'student_id'
+        : paymentColumns.has('user_id')
+          ? 'user_id'
+          : null;
+
+      if (!paymentUserIdColumn || !paymentColumns.has('amount')) {
+        console.warn('[Students] Skipping initial payment insert; required columns missing on payments table');
+      } else {
+        const insertColumns: string[] = [];
+        const placeholders: string[] = [];
+        const values: any[] = [];
+        let paymentParamIndex = 1;
+        const pushColumn = (column: string, value: any) => {
+          if (paymentColumns.has(column)) {
+            insertColumns.push(column);
+            placeholders.push(`$${paymentParamIndex++}`);
+            values.push(value);
+          }
+        };
+
+        pushColumn(paymentUserIdColumn, createdUser.id);
+        pushColumn('hostel_id', hostelId);
+        pushColumn('semester_id', semesterId);
+        pushColumn('amount', initialPayment);
+
+        const resolvedCurrency = currency || 'UGX';
+        if (paymentColumns.has('currency')) {
+          pushColumn('currency', resolvedCurrency);
+        } else if (paymentColumns.has('currency_code')) {
+          pushColumn('currency_code', resolvedCurrency);
+        }
+
+        if (paymentColumns.has('purpose')) {
+          pushColumn('purpose', 'booking');
+        } else if (paymentColumns.has('notes')) {
+          pushColumn('notes', 'booking');
+        }
+
+        if (paymentColumns.has('status')) {
+          pushColumn('status', 'completed');
+        }
+        if (paymentColumns.has('payment_method')) {
+          pushColumn('payment_method', 'cash');
+        }
+        if (paymentColumns.has('created_at')) {
+          pushColumn('created_at', new Date());
+        }
+        if (paymentColumns.has('updated_at')) {
+          pushColumn('updated_at', new Date());
+        }
+
+        if (insertColumns.length >= 2) {
+          await client.query(
+            `INSERT INTO payments (${insertColumns.join(', ')})
+             VALUES (${placeholders.join(', ')})`,
+            values
+          );
+        } else {
+          console.warn('[Students] Initial payment insert skipped; insufficient columns detected:', insertColumns);
+        }
+      }
     }
 
     await client.query('COMMIT');

@@ -37,22 +37,41 @@ router.get('/', async (req, res) => {
     const limit = Math.min(100, limitRaw);
     const offset = (page - 1) * limit;
     const semesterId = req.query.semester_id ? Number(req.query.semester_id) : null;
-    
-    const semesterFilter = semesterId ? 'AND semester_id = $2' : '';
-    const queryParams = semesterId ? [hostelId, semesterId, limit, offset] : [hostelId, limit, offset];
-    
-    // Check which date column exists
-    const dateColumnCheck = await pool.query(`
+
+    const columnsRes = await pool.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = 'expenses' AND (column_name = 'spent_at' OR column_name = 'expense_date')
+      WHERE table_schema = 'public' AND table_name = 'expenses'
     `);
-    const dateColumn = dateColumnCheck.rows[0]?.column_name || 'expense_date';
-    
+    const columns = columnsRes.rows.map(row => row.column_name);
+    const hasSemesterIdColumn = columns.includes('semester_id');
+    const dateColumn = columns.includes('spent_at') ? 'spent_at' : 'expense_date';
+
+    if (semesterId !== null && !hasSemesterIdColumn) {
+      return res.status(400).json({ success: false, message: 'Semester filtering is not supported because expenses.semester_id column is missing' });
+    }
+
+    const params: any[] = [hostelId];
+    let paramIndex = 2;
+    let whereClause = 'hostel_id = $1';
+
+    if (semesterId !== null && hasSemesterIdColumn) {
+      whereClause += ` AND semester_id = $${paramIndex}`;
+      params.push(semesterId);
+      paramIndex++;
+    }
+
+    const limitIndex = paramIndex++;
+    const offsetIndex = paramIndex++;
+    params.push(limit);
+    params.push(offset);
+
     const r = await pool.query(
-      `SELECT * FROM expenses WHERE hostel_id = $1 ${semesterFilter} ORDER BY ${dateColumn} DESC
-       LIMIT $${semesterId ? '3' : '2'} OFFSET $${semesterId ? '4' : '3'}`,
-      queryParams
+      `SELECT * FROM expenses 
+       WHERE ${whereClause} 
+       ORDER BY ${dateColumn} DESC
+       LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
+      params
     );
     res.json({ success: true, data: r.rows, page, limit });
   } catch (e) {
@@ -118,46 +137,66 @@ router.post('/', async (req: Request, res) => {
     const { amount, currency, category, description, spent_at, expense_date } = req.body as any;
     if (!amount) return res.status(400).json({ success: false, message: 'Amount is required' });
     
-    // Check which date column exists
-    const dateColumnCheck = await pool.query(`
+    const columnsRes = await pool.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = 'expenses' AND (column_name = 'spent_at' OR column_name = 'expense_date')
+      WHERE table_schema = 'public' AND table_name = 'expenses'
     `);
-    const dateColumn = dateColumnCheck.rows[0]?.column_name || 'expense_date';
+    const existingColumns = columnsRes.rows.map(row => row.column_name);
+
+    // Determine column names supported by current schema
+    const dateColumn = existingColumns.includes('spent_at') ? 'spent_at' : 'expense_date';
     const dateValue = spent_at || expense_date || null;
-    
-    // Check if currency column exists
-    const currencyColumnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'expenses' AND column_name = 'currency'
-    `);
-    const hasCurrencyColumn = currencyColumnCheck.rows.length > 0;
-    
-    // Check if user_id column exists
-    const userIdColumnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'expenses' AND (column_name = 'user_id' OR column_name = 'paid_by')
-    `);
-    const userIdColumn = userIdColumnCheck.rows[0]?.column_name || 'paid_by';
+    const hasCurrencyColumn = existingColumns.includes('currency');
+    const hasSemesterColumn = existingColumns.includes('semester_id');
+    const userIdColumn = existingColumns.includes('user_id')
+      ? 'user_id'
+      : existingColumns.includes('paid_by')
+        ? 'paid_by'
+        : 'user_id';
+    const hasCategoryColumn = existingColumns.includes('category');
+    const hasDescriptionColumn = existingColumns.includes('description');
+
+    const insertColumns: string[] = ['hostel_id', userIdColumn, 'amount'];
+    const values: any[] = [hostelId, currentUser.id, parseFloat(amount)];
+    const placeholders: string[] = ['$1', '$2', '$3'];
+    let paramIndex = 4;
+
+    if (hasSemesterColumn) {
+      insertColumns.push('semester_id');
+      values.push(semesterCheck.semesterId ?? null);
+      placeholders.push(`$${paramIndex++}`);
+    }
     
     if (hasCurrencyColumn) {
-      const r = await pool.query(
-        `INSERT INTO expenses (hostel_id, ${userIdColumn}, semester_id, amount, currency, category, description, ${dateColumn})
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, CURRENT_DATE)) RETURNING *`,
-        [hostelId, currentUser.id, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', category || null, description || null, dateValue]
-      );
-      res.status(201).json({ success: true, data: r.rows[0] });
-    } else {
-      const r = await pool.query(
-        `INSERT INTO expenses (hostel_id, ${userIdColumn}, semester_id, amount, category, description, ${dateColumn})
-         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE)) RETURNING *`,
-        [hostelId, currentUser.id, semesterCheck.semesterId, parseFloat(amount), category || null, description || null, dateValue]
-      );
-      res.status(201).json({ success: true, data: r.rows[0] });
+      insertColumns.push('currency');
+      values.push(currency || 'UGX');
+      placeholders.push(`$${paramIndex++}`);
     }
+
+    if (hasCategoryColumn) {
+      insertColumns.push('category');
+      values.push(category || null);
+      placeholders.push(`$${paramIndex++}`);
+    }
+
+    if (hasDescriptionColumn) {
+      insertColumns.push('description');
+      values.push(description || null);
+      placeholders.push(`$${paramIndex++}`);
+    }
+
+    insertColumns.push(dateColumn);
+    values.push(dateValue);
+    placeholders.push(`COALESCE($${paramIndex++}, CURRENT_DATE)`);
+
+    const insertQuery = `
+      INSERT INTO expenses (${insertColumns.join(', ')})
+      VALUES (${placeholders.join(', ')})
+      RETURNING *`;
+
+    const r = await pool.query(insertQuery, values);
+      res.status(201).json({ success: true, data: r.rows[0] });
   } catch (e) {
     console.error('Create expense error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });

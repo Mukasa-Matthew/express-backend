@@ -140,15 +140,21 @@ router.post('/', async (req: Request, res) => {
       const r = await pool.query(
         `INSERT INTO inventory_items (hostel_id, name, quantity, unit, category, purchase_price, status, notes, created_at, updated_at)
          VALUES ($1, $2, COALESCE($3,0), $4, $5, $6, COALESCE($7,'active'), $8, NOW(), NOW()) RETURNING *`,
-        [hostelId, name, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || null, notes || null]
+        [hostelId, name, quantity ?? null, unit || null, category || null, purchase_price ?? null, status || 'active', notes || null]
       );
       res.status(201).json({ success: true, data: r.rows[0] });
     } else {
       // Use inventory table (different column names)
+      const validCondition = typeof status === 'string'
+        ? status.toLowerCase()
+        : (status || '').toString().toLowerCase();
+      const allowedConditions = ['good', 'fair', 'poor', 'needs_repair'];
+      const normalizedCondition = allowedConditions.includes(validCondition) ? validCondition : 'good';
+
       const r = await pool.query(
         `INSERT INTO inventory (hostel_id, item_name, quantity, unit, category, condition, notes, created_at, updated_at)
-         VALUES ($1, $2, COALESCE($3,0), $4, $5, COALESCE($6,'good'), $7, NOW(), NOW()) RETURNING *`,
-        [hostelId, name, quantity ?? null, unit || null, category || null, status || 'good', notes || null]
+         VALUES ($1, $2, COALESCE($3,0), $4, $5, $6, $7, NOW(), NOW()) RETURNING *`,
+        [hostelId, name, quantity ?? null, unit || null, category || null, normalizedCondition, notes || null]
       );
       // Map response to match expected format
       const mappedRow = {

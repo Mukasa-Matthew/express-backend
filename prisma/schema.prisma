@@ -97,6 +97,7 @@ model User {
   hostelId      Int?      @map("hostel_id")
   universityId  Int?      @map("university_id")
   profilePicture String?  @map("profile_picture") @db.VarChar(500)
+  passwordIsTemp Boolean  @default(false) @map("password_is_temp")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
   

@@ -3,7 +3,8 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
-import { UserModel } from '../models/User';
+import jwt, { JsonWebTokenError, TokenExpiredError } from 'jsonwebtoken';
+import { UserModel, User } from '../models/User';
 import pool from '../config/database';
 import { EmailService } from '../services/emailService';
 import { CredentialGenerator } from '../utils/credentialGenerator';
@@ -18,9 +19,64 @@ async function ensureCustodianOptionalColumns() {
     await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`);
     await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`);
     await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS national_id_image_path TEXT`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS original_username TEXT`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS original_password TEXT`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS credentials_invalidated BOOLEAN DEFAULT FALSE`);
+    await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS credentials_invalidated_at TIMESTAMPTZ`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_is_temp BOOLEAN DEFAULT FALSE`);
     custodianColumnsEnsured = true;
   } catch (err) {
     console.warn('Failed to ensure optional custodian columns exist:', err);
+  }
+}
+
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
+
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return null;
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : authHeader.trim();
+
+  if (!token || token.toLowerCase() === 'null' || token.toLowerCase() === 'undefined') {
+    return null;
+  }
+
+  return token;
+}
+
+type AuthResult =
+  | { user: User; decoded: jwt.JwtPayload & { userId?: number } }
+  | { error: { status: number; message: string } };
+
+async function authenticateRequest(req: Request): Promise<AuthResult> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    return { error: { status: 401, message: 'No token provided' } };
+  }
+
+  const isLikelyJwt = token.includes('.') && token.split('.').length === 3;
+  if (!isLikelyJwt) {
+    console.warn('[Custodians] Token format invalid or incomplete');
+    return { error: { status: 401, message: 'Invalid token' } };
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload & { userId?: number };
+    if (typeof decoded?.userId !== 'number') {
+      return { error: { status: 401, message: 'Invalid token payload' } };
+    }
+
+    const user = await UserModel.findById(decoded.userId);
+    if (!user) {
+      return { error: { status: 401, message: 'Unauthorized' } };
+    }
+
+    return { user, decoded };
+  } catch (err: any) {
+    console.warn('[Custodians] Token verification failed:', err?.message || err);
+    return { error: { status: 401, message: 'Invalid token' } };
   }
 }
 
@@ -58,17 +114,13 @@ router.get('/', async (req, res) => {
   try {
     await ensureCustodianOptionalColumns();
 
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
     }
-    // Simple decode: we trust auth middleware in real apps; here we query via join on current user
-    // Get user via token
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) {
-      return res.status(401).json({ success: false, message: 'Unauthorized' });
-    }
+    const currentUser = authResult.user;
 
     // Determine target hostel id
     let targetHostelId: number | null = null;
@@ -95,6 +147,7 @@ router.get('/', async (req, res) => {
        COALESCE(c.phone, NULL) AS phone,
        COALESCE(c.location, NULL) AS location,
        COALESCE(c.national_id_image_path, NULL) AS national_id_image_path,
+       c.credentials_invalidated,
        c.status,
        c.created_at,
        c.hostel_id
@@ -123,6 +176,7 @@ router.get('/', async (req, res) => {
         phone: row.phone ?? null,
         location: row.location ?? null,
         national_id_image_path: row.national_id_image_path ?? null,
+        password_is_temp: row.credentials_invalidated ? false : true,
         status: row.status || 'active',
         created_at: row.created_at,
         hostel_id: row.hostel_id
@@ -132,8 +186,14 @@ router.get('/', async (req, res) => {
     });
     
     res.json({ success: true, data: mappedRows });
-  } catch (e) {
-    console.error('List custodians error:', e);
+  } catch (unknownError) {
+    const err = unknownError as Partial<JsonWebTokenError> & { message?: string; name?: string };
+    if (err instanceof JsonWebTokenError || err instanceof TokenExpiredError || err?.name === 'JsonWebTokenError' || err?.name === 'TokenExpiredError') {
+      console.warn('[Custodians] Unauthorized access attempt:', err?.message || err);
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+
+    console.error('List custodians error:', unknownError);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -141,11 +201,13 @@ router.get('/', async (req, res) => {
 // Get current custodian's hostel information (must be before /:id routes)
 router.get('/my-hostel', async (req: Request, res) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
+    }
+    const currentUser = authResult.user;
 
     // Only custodians can access this endpoint
     if (currentUser.role !== 'custodian') {
@@ -190,15 +252,13 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
   try {
     await ensureCustodianOptionalColumns();
 
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'No token provided' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
     }
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) {
-      return res.status(401).json({ success: false, message: 'Unauthorized' });
-    }
+    const currentUser = authResult.user;
 
     // Determine target hostel id
     let targetHostelId: number | null = null;
@@ -320,7 +380,7 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
 
       await client.query(
         `UPDATE users 
-           SET name = $1, role = $2, hostel_id = $3, password = $4, updated_at = NOW()
+           SET name = $1, role = $2, hostel_id = $3, password = $4, password_is_temp = TRUE, updated_at = NOW()
          WHERE id = $5`,
         [name || existingName, 'custodian', targetHostelId, hashed, userId]
       );
@@ -328,8 +388,8 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       await client.query('DELETE FROM custodians WHERE user_id = $1', [userId]);
     } else {
       const insertUserResult = await client.query(
-        `INSERT INTO users (email, name, password, role, hostel_id) 
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO users (email, name, password, role, hostel_id, password_is_temp) 
+         VALUES ($1, $2, $3, $4, $5, TRUE)
          RETURNING id, name, email`,
         [email, name, hashed, 'custodian', targetHostelId]
       );
@@ -341,10 +401,10 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     }
 
     const custodianInsert = await client.query(
-      `INSERT INTO custodians (user_id, hostel_id, phone, location, national_id_image_path)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO custodians (user_id, hostel_id, phone, location, national_id_image_path, original_username, original_password, credentials_invalidated, credentials_invalidated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id`,
-      [userId, targetHostelId, phone, location, nationalIdPath]
+      [userId, targetHostelId, phone, location, nationalIdPath, userEmailForResponse, tempPassword, false, null]
     );
 
     const custodianId = custodianInsert.rows[0]?.id || null;
@@ -389,6 +449,7 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
           name: name || userNameForResponse,
           phone,
           location,
+          password_is_temp: true,
           role: 'custodian'
         },
         credentials: {
@@ -472,11 +533,13 @@ router.put('/:id', async (req: Request, res) => {
   try {
     await ensureCustodianOptionalColumns();
 
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
+    }
+    const currentUser = authResult.user;
 
     const { id } = req.params;
     const { name, phone, location, status } = req.body as any;
@@ -546,11 +609,13 @@ router.put('/:id', async (req: Request, res) => {
 router.delete('/by-email/:email', async (req: Request, res) => {
   const client = await pool.connect();
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
+    }
+    const currentUser = authResult.user;
 
     // Only allow hostel_admin and super_admin
     if (currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
@@ -633,11 +698,13 @@ router.delete('/by-email/:email', async (req: Request, res) => {
 router.delete('/:id', async (req: Request, res) => {
   const client = await pool.connect();
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
+    }
+    const currentUser = authResult.user;
 
     const { id } = req.params;
 
@@ -674,104 +741,20 @@ const custodianResendLimiter = new SimpleRateLimiter(3, 60 * 60 * 1000);
 router.post('/:id/resend-credentials', async (req: Request, res) => {
   const client = await pool.connect();
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
-
-    const { id } = req.params;
-
-    // Fetch custodian with hostel name and ensure access
-    const custodianRes = await pool.query(
-      `SELECT c.id, c.user_id, c.hostel_id, u.email, u.name, h.name AS hostel_name
-       FROM custodians c
-       JOIN users u ON u.id = c.user_id
-       LEFT JOIN hostels h ON h.id = c.hostel_id
-       WHERE c.id = $1`,
-      [parseInt(id)]
-    );
-    if (!custodianRes.rowCount) return res.status(404).json({ success: false, message: 'Custodian not found' });
-    const row = custodianRes.rows[0];
-
-    if (currentUser.role !== 'super_admin' && (!currentUser.hostel_id || currentUser.hostel_id !== row.hostel_id)) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
     }
+    const currentUser = authResult.user;
 
-    // Rate limit per (requester, custodianId, action)
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip || '';
-    const rl = custodianResendLimiter.allow(['resend_custodian_credentials', currentUser.id, id, ip]);
-    if (!rl.allowed) {
-      return res.status(429).json({ success: false, message: `Too many requests. Try again in ${Math.ceil(rl.resetMs/1000)}s` });
-    }
-
-    const tempPassword = CredentialGenerator.generatePatternPassword();
-    const hashed = await bcrypt.hash(tempPassword, 10);
-
-    await client.query('BEGIN');
-    await client.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, row.user_id]);
-    await client.query('COMMIT');
-
-    // Email credentials
-    try {
-      const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-      const hostelName = row.hostel_name || 'Your Hostel';
-      const html = EmailService.generateCustodianWelcomeEmail(
-        row.name || 'Custodian',
-        row.email,
-        row.email,
-        tempPassword,
-        hostelName,
-        loginUrl
-      );
-      await EmailService.sendEmail({ 
-        to: row.email, 
-        subject: `New Login Credentials - Custodian - ${hostelName} - LTS Portal`, 
-        html 
-      });
-    } catch (e) {
-      console.error('Email send error:', e);
-    }
-
-    // Audit success
-    await pool.query(
-      `INSERT INTO audit_logs (action, requester_user_id, target_user_id, target_hostel_id, status, message, ip_address, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      ['resend_custodian_credentials', currentUser.id, row.user_id, row.hostel_id, 'success', 'Password rotated and email sent', ip, (req.headers['user-agent'] as string) || null]
-    );
-
-    // Return credentials in response so hostel admin can view/copy them
-    res.json({ 
-      success: true, 
-      message: 'New credentials generated and sent successfully',
-      data: {
-        credentials: {
-          username: row.email,
-          password: tempPassword,
-          loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
-        },
-        custodian: {
-          id: row.id,
-          user_id: row.user_id,
-          email: row.email,
-          name: row.name
-        }
-      }
+    return res.status(403).json({
+      success: false,
+      message: 'Resending custodian credentials is disabled. Ask the custodian to reset their password from the login screen.'
     });
   } catch (e) {
-    await pool.query('ROLLBACK');
     console.error('Resend custodian credentials error:', e);
-    try {
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      const decoded: any = token ? require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret') : null;
-      const requesterId = decoded?.userId || null;
-      const { id } = req.params;
-      await pool.query(
-        `INSERT INTO audit_logs (action, requester_user_id, target_user_id, target_hostel_id, status, message, ip_address, user_agent)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        ['resend_custodian_credentials', requesterId, null, null, 'failure', 'Internal server error', (req.headers['x-forwarded-for'] as string) || req.ip || '', (req.headers['user-agent'] as string) || null]
-      );
-    } catch {}
     res.status(500).json({ success: false, message: 'Internal server error' });
   } finally {
     client.release();
@@ -782,18 +765,28 @@ router.post('/:id/resend-credentials', async (req: Request, res) => {
 // Since passwords are hashed, this endpoint generates new credentials and returns them
 router.get('/:id/view-credentials', async (req: Request, res) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const authResult = await authenticateRequest(req);
+    if ('error' in authResult) {
+      return res
+        .status(authResult.error.status)
+        .json({ success: false, message: authResult.error.message });
+    }
+    const currentUser = authResult.user;
 
     const { id } = req.params;
-    const generateNew = req.query.generate !== 'false'; // Default: generate new credentials
 
-    // Fetch custodian and ensure access
+    const generateNew = req.query.generate === 'true';
+
     const custodianRes = await pool.query(
-      `SELECT c.id, c.user_id, c.hostel_id, u.email, u.name
+      `SELECT c.id,
+              c.user_id,
+              c.hostel_id,
+              c.original_username,
+              c.original_password,
+              c.credentials_invalidated,
+              c.credentials_invalidated_at,
+              u.email,
+              u.name
        FROM custodians c
        JOIN users u ON u.id = c.user_id
        WHERE c.id = $1`,
@@ -802,38 +795,62 @@ router.get('/:id/view-credentials', async (req: Request, res) => {
     if (!custodianRes.rowCount) return res.status(404).json({ success: false, message: 'Custodian not found' });
     const row = custodianRes.rows[0];
 
-    // Check permissions: super_admin or hostel_admin of same hostel
     if (currentUser.role !== 'super_admin' && (!currentUser.hostel_id || currentUser.hostel_id !== row.hostel_id)) {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
     if (!generateNew) {
-      // Just return custodian info without generating new password
+      if (row.credentials_invalidated || !row.original_password) {
+        return res.status(403).json({
+          success: false,
+          message: 'Credentials are no longer available because the custodian has updated their password.'
+        });
+      }
+
       return res.json({
         success: true,
-        message: 'Custodian information retrieved. Passwords are hashed and cannot be retrieved.',
+        message: 'Original credentials retrieved successfully.',
         data: {
+          credentials: {
+            username: row.original_username || row.email,
+            password: row.original_password,
+            loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+          },
           custodian: {
             id: row.id,
             user_id: row.user_id,
             email: row.email,
-            name: row.name,
-            username: row.email
-          },
-          note: 'Passwords are securely hashed and cannot be retrieved. Use ?generate=true or the resend-credentials endpoint to generate new credentials.'
+            name: row.name
+          }
         }
       });
     }
 
-    // Generate new temporary password and update it
+    if (row.credentials_invalidated) {
+      return res.status(403).json({
+        success: false,
+        message: 'Credentials cannot be regenerated because the custodian has already changed their password.'
+      });
+    }
+
     const tempPassword = CredentialGenerator.generatePatternPassword();
     const hashed = await bcrypt.hash(tempPassword, 10);
 
-    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, row.user_id]);
+    await pool.query('UPDATE users SET password = $1, password_is_temp = TRUE WHERE id = $2', [hashed, row.user_id]);
+    await pool.query(
+      `UPDATE custodians
+          SET original_username = $1,
+              original_password = $2,
+              credentials_invalidated = FALSE,
+              credentials_invalidated_at = NULL,
+              updated_at = NOW()
+        WHERE id = $3`,
+      [row.email, tempPassword, row.id]
+    );
 
     res.json({
       success: true,
-      message: 'New credentials generated successfully',
+      message: 'New credentials generated successfully.',
       data: {
         credentials: {
           username: row.email,
@@ -848,7 +865,6 @@ router.get('/:id/view-credentials', async (req: Request, res) => {
         }
       }
     });
-
   } catch (error: any) {
     console.error('View custodian credentials error:', error);
     res.status(500).json({

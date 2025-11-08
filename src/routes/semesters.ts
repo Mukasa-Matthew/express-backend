@@ -136,8 +136,19 @@ router.post('/global', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Semester name is required' });
     }
 
-    const globalSemester = await GlobalSemesterModel.create({ name, description });
-    res.status(201).json({ success: true, globalSemester });
+    try {
+      const globalSemester = await GlobalSemesterModel.create({ name, description });
+      return res.status(201).json({ success: true, globalSemester });
+    } catch (error: any) {
+      if (error.code === '42P01' || error.message?.includes('does not exist')) {
+        console.warn('global_semesters table missing - skipping creation');
+        return res.status(400).json({
+          success: false,
+          message: 'Global semesters feature is not available because the global_semesters table is missing. Please run the latest migrations.',
+        });
+      }
+      throw error;
+    }
   } catch (error: any) {
     console.error('Error creating global semester:', error);
     if (error.code === '23505') { // Unique constraint violation

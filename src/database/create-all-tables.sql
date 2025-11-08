@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS users (
     hostel_id INTEGER REFERENCES hostels(id) ON DELETE SET NULL,
     university_id INTEGER REFERENCES universities(id),
     profile_picture VARCHAR(500),
+    password_is_temp BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

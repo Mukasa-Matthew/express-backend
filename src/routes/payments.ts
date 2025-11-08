@@ -52,34 +52,110 @@ router.post('/', async (req: Request, res) => {
     const student = await pool.query('SELECT id, email, name FROM users WHERE id = $1 AND hostel_id = $2 AND role = \'user\'', [user_id, hostelId]);
     if (!student.rowCount) return res.status(404).json({ success: false, message: 'Student not found in this hostel' });
 
+    // Inspect payments table columns for legacy compatibility
+    const paymentsColumnsRes = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'payments'
+    `);
+    const paymentColumns = paymentsColumnsRes.rows.map(r => r.column_name);
+    const paymentUserIdColumn = paymentColumns.includes('user_id')
+      ? 'user_id'
+      : paymentColumns.includes('student_id')
+        ? 'student_id'
+        : 'user_id';
+    const hasHostelIdColumn = paymentColumns.includes('hostel_id');
+    const hasSemesterIdColumn = paymentColumns.includes('semester_id');
+    const hasCurrencyColumn = paymentColumns.includes('currency');
+    const purposeColumn = paymentColumns.includes('purpose')
+      ? 'purpose'
+      : paymentColumns.includes('notes')
+        ? 'notes'
+        : null;
+
+    const sraColumnsRes = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'student_room_assignments'
+    `);
+    const sraColumns = sraColumnsRes.rows.map(r => r.column_name);
+    const sraUserIdColumn = sraColumns.includes('user_id')
+      ? 'user_id'
+      : sraColumns.includes('student_id')
+        ? 'student_id'
+        : 'user_id';
+    const sraHasSemesterColumn = sraColumns.includes('semester_id');
+
+    const insertColumns: string[] = [paymentUserIdColumn];
+    const insertValues: any[] = [user_id];
+    const placeholders: string[] = ['$1'];
+    let paramIndex = 2;
+
+    if (hasHostelIdColumn) {
+      insertColumns.push('hostel_id');
+      insertValues.push(hostelId);
+      placeholders.push(`$${paramIndex++}`);
+    }
+
+    if (hasSemesterIdColumn) {
+      insertColumns.push('semester_id');
+      insertValues.push(semesterCheck.semesterId ?? null);
+      placeholders.push(`$${paramIndex++}`);
+    }
+
+    insertColumns.push('amount');
+    insertValues.push(parseFloat(amount));
+    placeholders.push(`$${paramIndex++}`);
+
+    if (hasCurrencyColumn) {
+      insertColumns.push('currency');
+      insertValues.push(currency || 'UGX');
+      placeholders.push(`$${paramIndex++}`);
+    }
+
+    if (purposeColumn) {
+      insertColumns.push(purposeColumn);
+      insertValues.push(purpose || 'booking');
+      placeholders.push(`$${paramIndex++}`);
+    }
+
     // Compute balance (simple: sum of payments negative; could be extended with expected fees table)
     await client.query('BEGIN');
     const payRes = await client.query(
-      'INSERT INTO payments (user_id, hostel_id, semester_id, amount, currency, purpose) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at',
-      [user_id, hostelId, semesterCheck.semesterId, parseFloat(amount), currency || 'UGX', purpose || 'booking']
+      `INSERT INTO payments (${insertColumns.join(', ')})
+       VALUES (${placeholders.join(', ')})
+       RETURNING id, created_at`,
+      insertValues
     );
 
     // Check if student_room_assignments table uses student_id or user_id
-    const sraUserIdColumnCheck = await client.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'student_room_assignments' AND (column_name = 'user_id' OR column_name = 'student_id')
-    `);
-    const sraUserIdColumn = sraUserIdColumnCheck.rows[0]?.column_name || 'student_id';
-    
-    // Get room assignment and expected price for this semester
-    const roomRes = await client.query(
-      `SELECT rm.room_number, rm.price::numeric AS expected_price
+    const roomParams: any[] = [user_id];
+    let roomQuery = `
+      SELECT rm.room_number, rm.price::numeric AS expected_price
        FROM student_room_assignments sra
        JOIN rooms rm ON rm.id = sra.room_id
-       WHERE sra.${sraUserIdColumn} = $1 AND sra.semester_id = $2 AND sra.status = 'active'
-       LIMIT 1`,
-      [user_id, semesterCheck.semesterId]
-    );
+      WHERE sra.${sraUserIdColumn} = $1
+        AND sra.status = 'active'`;
+
+    if (sraHasSemesterColumn && semesterCheck.semesterId != null) {
+      roomQuery += ' AND sra.semester_id = $2';
+      roomParams.push(semesterCheck.semesterId);
+    }
+
+    roomQuery += `
+      LIMIT 1`;
+
+    const roomRes = await client.query(roomQuery, roomParams);
     const room = roomRes.rows[0] || null;
 
     // Compute totals AFTER this payment for this semester
-    const sumRes = await client.query('SELECT COALESCE(SUM(amount),0) as total_paid FROM payments WHERE user_id = $1 AND semester_id = $2', [user_id, semesterCheck.semesterId]);
+    const sumParams: any[] = [user_id];
+    let sumQuery = `SELECT COALESCE(SUM(amount),0) as total_paid FROM payments WHERE ${paymentUserIdColumn} = $1`;
+    if (hasSemesterIdColumn && semesterCheck.semesterId != null) {
+      sumParams.push(semesterCheck.semesterId);
+      sumQuery += ' AND semester_id = $2';
+    }
+    const sumRes = await client.query(sumQuery, sumParams);
     const totalPaidAfter = parseFloat(sumRes.rows[0]?.total_paid || '0');
     const expected = room?.expected_price != null ? parseFloat(room.expected_price) : null;
     const balanceAfter = expected != null ? (expected - totalPaidAfter) : null;
@@ -366,30 +442,69 @@ router.get('/', async (req, res) => {
     const limit = Math.min(100, limitRaw);
     const offset = (page - 1) * limit;
 
+    const paymentsColumnsRes = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'payments'
+    `);
+    const paymentColumns = paymentsColumnsRes.rows.map(r => r.column_name);
+    const paymentUserIdColumn = paymentColumns.includes('user_id')
+      ? 'user_id'
+      : paymentColumns.includes('student_id')
+        ? 'student_id'
+        : 'user_id';
+    const hasHostelIdColumn = paymentColumns.includes('hostel_id');
+    const hasSemesterIdColumn = paymentColumns.includes('semester_id');
+    const purposeColumn = paymentColumns.includes('purpose')
+      ? 'purpose'
+      : paymentColumns.includes('notes')
+        ? 'notes'
+        : null;
+    const purposeSelect = purposeColumn ? `p.${purposeColumn}` : 'NULL';
+
     const params: any[] = [hostelId];
     let paramIndex = 2;
-    const where: string[] = ['p.hostel_id = $1'];
+    const where: string[] = [hasHostelIdColumn ? 'p.hostel_id = $1' : 'u.hostel_id = $1'];
+
     if (semesterId !== null) {
+      if (!hasSemesterIdColumn) {
+        return res.status(400).json({ success: false, message: 'Semester filtering is not supported because payments.semester_id column is missing' });
+      }
       where.push(`p.semester_id = $${paramIndex}`);
       params.push(semesterId);
       paramIndex++;
     }
+
     if (typeof userIdFilter === 'number' && !Number.isNaN(userIdFilter)) {
-      where.push(`p.user_id = $${paramIndex}`);
+      where.push(`p.${paymentUserIdColumn} = $${paramIndex}`);
       params.push(userIdFilter);
       paramIndex++;
     }
+
     if (search) {
-      where.push(`(LOWER(u.name) LIKE $${paramIndex} OR LOWER(u.email) LIKE $${paramIndex} OR LOWER(p.purpose) LIKE $${paramIndex})`);
+      const searchConditions = [
+        `LOWER(u.name) LIKE $${paramIndex}`,
+        `LOWER(u.email) LIKE $${paramIndex}`,
+      ];
+      if (purposeColumn) {
+        searchConditions.push(`LOWER(p.${purposeColumn}) LIKE $${paramIndex}`);
+      }
+      where.push(`(${searchConditions.join(' OR ')})`);
       params.push(`%${search}%`);
       paramIndex++;
     }
 
     const query = `
-      SELECT p.id, p.user_id, p.amount, p.currency, p.purpose, p.created_at,
-             u.name as student_name, u.email as student_email
+      SELECT p.id,
+             p.${paymentUserIdColumn} AS user_id,
+             p.amount,
+             p.currency,
+             ${purposeSelect} AS purpose,
+             p.created_at,
+             u.name as student_name,
+             u.email as student_email
       FROM payments p
-      JOIN users u ON u.id = p.user_id
+      JOIN users u ON u.id = p.${paymentUserIdColumn}
       WHERE ${where.join(' AND ')}
       ORDER BY p.created_at DESC
       LIMIT ${limit} OFFSET ${offset}`;

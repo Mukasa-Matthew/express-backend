@@ -12,6 +12,7 @@ export interface User {
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
   hostel_id?: number | null;
   profile_picture?: string | null;
+  password_is_temp?: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -23,6 +24,7 @@ export interface CreateUserData {
   password: string;
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
   hostel_id?: number;
+  password_is_temp?: boolean;
 }
 
 // Helper function to convert Prisma User to our User interface
@@ -36,6 +38,7 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
     role: prismaUser.role as User['role'],
     hostel_id: prismaUser.hostelId,
     profile_picture: prismaUser.profilePicture,
+    password_is_temp: prismaUser.passwordIsTemp ?? false,
     created_at: prismaUser.createdAt,
     updated_at: prismaUser.updatedAt,
   };
@@ -43,7 +46,7 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
 
 export class UserModel {
   static async create(userData: CreateUserData): Promise<User> {
-    const { email, name, password, role, username, hostel_id } = userData;
+    const { email, name, password, role, username, hostel_id, password_is_temp } = userData;
 
     try {
       const prismaUser = await prisma.user.create({
@@ -54,6 +57,7 @@ export class UserModel {
           role,
           username: username || null,
           hostelId: hostel_id || null,
+          passwordIsTemp: password_is_temp ?? false,
         },
       });
 
@@ -77,10 +81,10 @@ export class UserModel {
         );
 
         const result = await pool.query(
-          `INSERT INTO users (email, name, password, role, hostel_id)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, email, name, password, role, hostel_id, created_at, updated_at`,
-          [email, name, password, role, hostel_id ?? null]
+          `INSERT INTO users (email, name, password, role, hostel_id, password_is_temp)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, email, name, password, role, hostel_id, password_is_temp, created_at, updated_at`,
+          [email, name, password, role, hostel_id ?? null, password_is_temp ?? false]
         );
 
         const row = result.rows[0];
@@ -93,6 +97,7 @@ export class UserModel {
           role: row.role,
           hostel_id: row.hostel_id,
           profile_picture: row.profile_picture ?? null,
+          password_is_temp: row.password_is_temp ?? false,
           created_at: row.created_at,
           updated_at: row.updated_at,
         };
@@ -167,6 +172,7 @@ export class UserModel {
         hostelId: true,
         username: true,
         profilePicture: true,
+        passwordIsTemp: true,
         createdAt: true,
         updatedAt: true,
         password: false, // Don't return password by default
@@ -215,6 +221,7 @@ export class UserModel {
       }
     }
     if (updateData.profile_picture !== undefined) prismaUpdateData.profilePicture = updateData.profile_picture || null;
+    if (updateData.password_is_temp !== undefined) prismaUpdateData.passwordIsTemp = updateData.password_is_temp;
     
     const prismaUser = await prisma.user.update({
       where: { id },

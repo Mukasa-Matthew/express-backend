@@ -111,11 +111,72 @@ router.post('/', async (req: Request, res) => {
     }
     // Validate capacity is between 1 and 4
     const roomCapacity = capacity && capacity >= 1 && capacity <= 4 ? parseInt(capacity) : 1;
-    const result = await pool.query(
-      `INSERT INTO rooms (hostel_id, room_number, price, description, self_contained, capacity, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, COALESCE($5,false), $6, 'available', NOW(), NOW()) RETURNING *`,
-      [currentUser.hostel_id, room_number, price, description || null, !!self_contained, roomCapacity]
-    );
+    const columnCheck = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'rooms'
+    `);
+    const columns = columnCheck.rows.map((row) => row.column_name);
+    const hasDescription = columns.includes('description');
+    const hasSelfContained = columns.includes('self_contained');
+    const hasStatus = columns.includes('status');
+
+    const insertColumns = ['hostel_id', 'room_number', 'price', 'capacity'];
+    const placeholders = ['$1', '$2', '$3', '$4'];
+    const values: any[] = [currentUser.hostel_id, room_number, price, roomCapacity];
+    let paramIndex = 5;
+
+    if (columns.includes('floor')) {
+      insertColumns.push('floor');
+      placeholders.push(`$${paramIndex}`);
+      values.push(1);
+      paramIndex += 1;
+    }
+
+    if (columns.includes('amenities')) {
+      insertColumns.push('amenities');
+      placeholders.push(`$${paramIndex}`);
+      values.push(null);
+      paramIndex += 1;
+    }
+
+    if (hasDescription) {
+      insertColumns.push('description');
+      placeholders.push(`$${paramIndex}`);
+      values.push(description || null);
+      paramIndex += 1;
+    }
+
+    if (hasSelfContained) {
+      insertColumns.push('self_contained');
+      placeholders.push(`$${paramIndex}`);
+      values.push(self_contained !== undefined ? !!self_contained : false);
+      paramIndex += 1;
+    }
+
+    if (hasStatus) {
+      insertColumns.push('status');
+      placeholders.push(`$${paramIndex}`);
+      values.push('available');
+      paramIndex += 1;
+    }
+
+    if (columns.includes('created_at')) {
+      insertColumns.push('created_at');
+      placeholders.push('NOW()');
+    }
+
+    if (columns.includes('updated_at')) {
+      insertColumns.push('updated_at');
+      placeholders.push('NOW()');
+    }
+
+    const insertQuery = `
+      INSERT INTO rooms (${insertColumns.join(', ')})
+      VALUES (${placeholders.join(', ')})
+      RETURNING *`;
+
+    const result = await pool.query(insertQuery, values);
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (e) {
     console.error('Create room error:', e);
