@@ -8,6 +8,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import pool from '../config/database';
+import SmsService from '../services/smsService';
 
 const router = express.Router();
 
@@ -647,6 +648,9 @@ router.post('/forgot-password', async (req, res) => {
       console.error('Error sending password reset OTP email:', emailError);
       // Don't fail the request if email fails
     }
+
+    // Send OTP via SMS (if configured and phone number available)
+    await SmsService.sendPasswordResetOtp(user, otp);
 
     res.json({ 
       success: true, 

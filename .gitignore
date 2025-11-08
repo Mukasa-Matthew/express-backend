@@ -33,7 +33,7 @@ coverage/
 
 # dotenv environment variables file
 # .env - COMMITTED BY USER REQUEST (uncomment line below to allow .env)
-.env
+
 # .env.local
 # .env.development.local
 # .env.test.local
