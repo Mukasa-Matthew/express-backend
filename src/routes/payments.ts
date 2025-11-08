@@ -238,9 +238,23 @@ router.post('/', async (req: Request, res) => {
 // Payments summary for current hostel (super_admin may pass ?hostel_id=...)
 router.get('/summary', async (req, res) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    const decoded: any = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    const authHeader = req.headers.authorization;
+    const tokenCandidate = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : authHeader?.trim();
+
+    if (!tokenCandidate || tokenCandidate.toLowerCase() === 'null' || tokenCandidate.toLowerCase() === 'undefined') {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(tokenCandidate, process.env.JWT_SECRET || 'fallback_secret');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('Payments summary token verification failed:', message);
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
     const currentUser = await UserModel.findById(decoded.userId);
     if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
 
