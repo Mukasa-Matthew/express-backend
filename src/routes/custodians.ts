@@ -239,59 +239,121 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
 
-    // Check if email already exists before attempting to create
-    const existingUser = await pool.query(
-      'SELECT id, name, email, role, hostel_id FROM users WHERE email = $1', 
+    // Check if email already exists before attempting to create (case-insensitive)
+    const existingUserResult = await pool.query(
+      'SELECT id, name, email, role, hostel_id FROM users WHERE LOWER(email) = LOWER($1)', 
       [email]
     );
-    if (existingUser.rows.length > 0) {
-      const user = existingUser.rows[0];
-      const userRole = user.role || 'unknown';
-      const userName = user.name || 'Unknown';
-      
-      // Get more context about the user
-      let additionalInfo = '';
-      if (userRole === 'custodian') {
-        const custodianCheck = await pool.query(
-          'SELECT id, hostel_id FROM custodians WHERE user_id = $1',
-          [user.id]
-        );
-        if (custodianCheck.rows.length > 0) {
-          const custodian = custodianCheck.rows[0];
-          const hostelCheck = await pool.query('SELECT name FROM hostels WHERE id = $1', [custodian.hostel_id]);
-          const hostelName = hostelCheck.rows[0]?.name || 'Unknown Hostel';
-          additionalInfo = ` This email is already registered as a custodian (${userName}) for ${hostelName}.`;
-        }
-      } else {
-        additionalInfo = ` This email is already registered as a ${userRole} (${userName}).`;
-      }
-      
-      return res.status(400).json({ 
-        success: false, 
-        message: `A user with this email address already exists.${additionalInfo} Please use a different email.`,
-        existingUser: {
-          name: userName,
-          email: user.email,
-          role: userRole
-        }
-      });
-    }
 
     const nationalIdPath = (req as any).file ? `/uploads/${(req as any).file.filename}` : null;
 
     await client.query('BEGIN');
 
-    // Create user with role custodian
     const tempPassword = CredentialGenerator.generatePatternPassword();
     const hashed = await bcrypt.hash(tempPassword, 10);
-    const user = await UserModel.create({ email, name, password: hashed, role: 'user' as any });
 
-    // Force role to custodian via direct update to avoid TypeScript union change
-    await client.query('UPDATE users SET role = $1 WHERE id = $2', ['custodian', user.id]);
+    let userId: number;
+    let userNameForResponse = name;
+    let userEmailForResponse = email;
+    const usingExistingAccount = existingUserResult.rows.length > 0;
+
+    if (usingExistingAccount) {
+      const existingUserRow = existingUserResult.rows[0];
+      const existingRole = existingUserRow.role || 'unknown';
+      const existingName = existingUserRow.name || name;
+
+      // Restrict deleting/re-using privileged accounts
+      if (existingRole === 'super_admin') {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          success: false,
+          message: 'This email belongs to the super admin and cannot be reused.',
+          existingUser: {
+            name: existingName,
+            email: existingUserRow.email,
+            role: existingRole
+          }
+        });
+      }
+
+      if (existingRole === 'hostel_admin' && existingUserRow.hostel_id && existingUserRow.hostel_id !== targetHostelId) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          success: false,
+          message: 'This email is already registered as a hostel admin for another hostel. Please use a different email.',
+          existingUser: {
+            name: existingName,
+            email: existingUserRow.email,
+            role: existingRole
+          }
+        });
+      }
+
+      if (existingRole === 'custodian') {
+        const custodianCheck = await pool.query(
+          'SELECT hostel_id FROM custodians WHERE user_id = $1',
+          [existingUserRow.id]
+        );
+        if (custodianCheck.rows.length > 0) {
+          const existingHostelId = custodianCheck.rows[0].hostel_id;
+          if (existingHostelId === targetHostelId) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              success: false,
+              message: 'This email is already registered as a custodian for your hostel.',
+              existingUser: {
+                name: existingName,
+                email: existingUserRow.email,
+                role: existingRole
+              }
+            });
+          }
+
+          await client.query('ROLLBACK');
+          return res.status(403).json({
+            success: false,
+            message: 'This email is already registered as a custodian for another hostel. Please use a different email.',
+            existingUser: {
+              name: existingName,
+              email: existingUserRow.email,
+              role: existingRole
+            }
+          });
+        }
+      }
+
+      // Re-use existing account: update role/hostel and rotate password
+      userId = existingUserRow.id;
+      userNameForResponse = existingName;
+      userEmailForResponse = existingUserRow.email;
+
+      await client.query(
+        `UPDATE users 
+           SET name = $1, role = $2, hostel_id = $3, password = $4, updated_at = NOW()
+         WHERE id = $5`,
+        [name || existingName, 'custodian', targetHostelId, hashed, userId]
+      );
+
+      // Remove any stale custodian profile for this user so we can recreate it cleanly
+      await client.query('DELETE FROM custodians WHERE user_id = $1', [userId]);
+    } else {
+      // Create fresh user record within the transaction
+      const insertUserResult = await client.query(
+        `INSERT INTO users (email, name, password, role, hostel_id) 
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, name, email`,
+        [email, name, hashed, 'custodian', targetHostelId]
+      );
+
+      const insertedUser = insertUserResult.rows[0];
+      userId = insertedUser.id;
+      userNameForResponse = insertedUser.name || name;
+      userEmailForResponse = insertedUser.email || email;
+    }
     
     // Build dynamic INSERT query based on available columns
     const insertColumns = ['user_id', 'hostel_id'];
-    const insertValues: any[] = [user.id, targetHostelId];
+    const insertValues: any[] = [userId, targetHostelId];
     
     if (hasPhoneColumn) {
       insertColumns.push('phone');
@@ -308,11 +370,14 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
 
     // Insert custodian profile
     const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
-    await client.query(
+    const custodianInsert = await client.query(
       `INSERT INTO custodians (${insertColumns.join(', ')})
-       VALUES (${placeholders})`,
+       VALUES (${placeholders})
+       RETURNING id`,
       insertValues
     );
+
+    const custodianId = custodianInsert.rows[0]?.id || null;
 
     await client.query('COMMIT');
 
@@ -331,15 +396,15 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     try {
       const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
       const html = EmailService.generateCustodianWelcomeEmail(
-        name,
-        email,
-        email,
+        name || userNameForResponse,
+        userEmailForResponse,
+        userEmailForResponse,
         tempPassword,
         hostelName,
         loginUrl
       );
       await EmailService.sendEmail({ 
-        to: email, 
+        to: userEmailForResponse, 
         subject: `Your Custodian Account - ${hostelName} - LTS Portal`, 
         html 
       });
@@ -353,13 +418,13 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       message: 'Custodian created successfully. Welcome email will be sent shortly.',
       data: {
         custodian: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
+          id: custodianId || userId,
+          email: userEmailForResponse,
+          name: name || userNameForResponse,
           role: 'custodian'
         },
         credentials: {
-          username: email,
+          username: userEmailForResponse,
           password: tempPassword,
           loginUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
         }
@@ -545,7 +610,7 @@ router.delete('/by-email/:email', async (req: Request, res) => {
             message: 'This user does not belong to your hostel' 
           });
         }
-      } else if (userToDelete.hostel_id !== currentUser.hostel_id) {
+      } else if (userToDelete.hostel_id && userToDelete.hostel_id !== currentUser.hostel_id) {
         return res.status(403).json({ 
           success: false, 
           message: 'This user does not belong to your hostel' 
