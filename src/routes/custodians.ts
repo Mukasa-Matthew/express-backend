@@ -204,6 +204,17 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       return res.status(400).json({ success: false, message: 'Missing required fields: name and email are required' });
     }
     
+    // Ensure optional columns exist for legacy databases
+    await pool
+      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`)
+      .catch((err) => console.warn('Failed ensuring custodians.phone column:', err?.message || err));
+    await pool
+      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`)
+      .catch((err) => console.warn('Failed ensuring custodians.location column:', err?.message || err));
+    await pool
+      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS national_id_image_path TEXT`)
+      .catch((err) => console.warn('Failed ensuring custodians.national_id_image_path column:', err?.message || err));
+
     // Check which columns exist in custodians table (do this once and reuse)
     const phoneCheckResult = await pool.query(`
       SELECT column_name 
@@ -392,25 +403,21 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       console.warn('Failed to fetch hostel name for email:', e);
     }
 
-    // Send welcome email
-    try {
-      const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
-      const html = EmailService.generateCustodianWelcomeEmail(
-        name || userNameForResponse,
-        userEmailForResponse,
-        userEmailForResponse,
-        tempPassword,
-        hostelName,
-        loginUrl
-      );
-      await EmailService.sendEmail({ 
-        to: userEmailForResponse, 
-        subject: `Your Custodian Account - ${hostelName} - LTS Portal`, 
-        html 
-      });
-    } catch (e) {
-      console.warn('Custodian welcome email failed:', e);
-    }
+    // Send welcome email asynchronously so slow email providers don't block the response
+    const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
+    const html = EmailService.generateCustodianWelcomeEmail(
+      name || userNameForResponse,
+      userEmailForResponse,
+      userEmailForResponse,
+      tempPassword,
+      hostelName,
+      loginUrl
+    );
+    EmailService.sendEmailAsync({
+      to: userEmailForResponse,
+      subject: `Your Custodian Account - ${hostelName} - LTS Portal`,
+      html
+    });
 
     // Return credentials in response so hostel admin can view/copy them
     res.status(201).json({ 
@@ -523,7 +530,15 @@ router.put('/:id', async (req: Request, res) => {
     }
 
     if (name) await pool.query('UPDATE users SET name = $1 WHERE id = (SELECT user_id FROM custodians WHERE id = $2)', [name, id]);
-    
+
+    // Ensure optional columns exist for legacy databases
+    await pool
+      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS phone VARCHAR(50)`)
+      .catch((err) => console.warn('Failed ensuring custodians.phone column:', err?.message || err));
+    await pool
+      .query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS location TEXT`)
+      .catch((err) => console.warn('Failed ensuring custodians.location column:', err?.message || err));
+
     // Check which columns exist before updating
     const phoneCheckUpdate = await pool.query(`
       SELECT column_name 
