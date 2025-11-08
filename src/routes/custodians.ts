@@ -199,7 +199,12 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       return res.status(403).json({ success: false, message: 'Forbidden: missing hostel context' });
     }
 
-    const { name, email, phone, location } = req.body;
+    const rawBody = req.body || {};
+    const name = normalizeStringField(rawBody.name) || '';
+    const email = normalizeStringField(rawBody.email) || '';
+    const phone = normalizeStringField(rawBody.phone);
+    const location = normalizeStringField(rawBody.location);
+
     if (!name || !email) {
       return res.status(400).json({ success: false, message: 'Missing required fields: name and email are required' });
     }
@@ -210,13 +215,11 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
       return res.status(400).json({ success: false, message: 'Location is required' });
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
 
-    // Check if email already exists before attempting to create (case-insensitive)
     const existingUserResult = await pool.query(
       'SELECT id, name, email, role, hostel_id FROM users WHERE LOWER(email) = LOWER($1)', 
       [email]
@@ -237,9 +240,8 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
     if (usingExistingAccount) {
       const existingUserRow = existingUserResult.rows[0];
       const existingRole = existingUserRow.role || 'unknown';
-      const existingName = existingUserRow.name || name;
+      const existingName = normalizeStringField(existingUserRow.name) || name;
 
-      // Restrict deleting/re-using privileged accounts
       if (existingRole === 'super_admin') {
         await client.query('ROLLBACK');
         return res.status(403).json({
@@ -299,7 +301,6 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
         }
       }
 
-      // Re-use existing account: update role/hostel and rotate password
       userId = existingUserRow.id;
       userNameForResponse = existingName;
       userEmailForResponse = existingUserRow.email;
@@ -311,10 +312,8 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
         [name || existingName, 'custodian', targetHostelId, hashed, userId]
       );
 
-      // Remove any stale custodian profile for this user so we can recreate it cleanly
       await client.query('DELETE FROM custodians WHERE user_id = $1', [userId]);
     } else {
-      // Create fresh user record within the transaction
       const insertUserResult = await client.query(
         `INSERT INTO users (email, name, password, role, hostel_id) 
          VALUES ($1, $2, $3, $4, $5)
@@ -324,34 +323,15 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
 
       const insertedUser = insertUserResult.rows[0];
       userId = insertedUser.id;
-      userNameForResponse = insertedUser.name || name;
-      userEmailForResponse = insertedUser.email || email;
-    }
-    
-    // Build dynamic INSERT query based on available columns
-    const insertColumns = ['user_id', 'hostel_id'];
-    const insertValues: any[] = [userId, targetHostelId];
-    
-    if (hasPhoneColumn) {
-      insertColumns.push('phone');
-      insertValues.push(phone);
-    }
-    if (hasLocationColumn) {
-      insertColumns.push('location');
-      insertValues.push(location);
-    }
-    if (hasNationalIdColumn) {
-      insertColumns.push('national_id_image_path');
-      insertValues.push(nationalIdPath);
+      userNameForResponse = normalizeStringField(insertedUser.name) || name;
+      userEmailForResponse = normalizeStringField(insertedUser.email) || email;
     }
 
-    // Insert custodian profile
-    const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
     const custodianInsert = await client.query(
       `INSERT INTO custodians (user_id, hostel_id, phone, location, national_id_image_path)
        VALUES ($1,$2,$3,$4,$5)
        RETURNING id`,
-      [userId, targetHostelId, phone || null, location || null, nationalIdPath]
+      [userId, targetHostelId, phone, location, nationalIdPath]
     );
 
     const custodianId = custodianInsert.rows[0]?.id || null;
@@ -394,6 +374,8 @@ router.post('/', upload.single('national_id_image'), async (req: Request, res) =
           id: custodianId || userId,
           email: userEmailForResponse,
           name: name || userNameForResponse,
+          phone,
+          location,
           role: 'custodian'
         },
         credentials: {
@@ -497,35 +479,50 @@ router.put('/:id', async (req: Request, res) => {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
-    if (name) await pool.query('UPDATE users SET name = $1 WHERE id = (SELECT user_id FROM custodians WHERE id = $2)', [name, id]);
+    if (name) {
+      await pool.query('UPDATE users SET name = $1 WHERE id = (SELECT user_id FROM custodians WHERE id = $2)', [name, id]);
+    }
 
-    // Build dynamic UPDATE query
     const updateParts: string[] = [];
     const updateValues: any[] = [];
-    
-    if (phone !== undefined) {
+    const normalizedPhone = phone !== undefined ? normalizeStringField(phone) : undefined;
+    const normalizedLocation = location !== undefined ? normalizeStringField(location) : undefined;
+
+    if (normalizedPhone !== undefined) {
       updateParts.push('phone = $' + (updateValues.length + 1));
-      updateValues.push(phone || null);
+      updateValues.push(normalizedPhone);
     }
-    if (location !== undefined) {
+    if (normalizedLocation !== undefined) {
       updateParts.push('location = $' + (updateValues.length + 1));
-      updateValues.push(location || null);
+      updateValues.push(normalizedLocation);
     }
     if (status !== undefined) {
       updateParts.push('status = $' + (updateValues.length + 1));
       updateValues.push(status);
     }
-    
+
     if (updateParts.length > 0) {
-      updateValues.push(id);
       updateParts.push('updated_at = NOW()');
+      updateValues.push(id);
       await pool.query(
         `UPDATE custodians SET ${updateParts.join(', ')} WHERE id = $${updateValues.length}`,
         updateValues
       );
     }
 
-    res.json({ success: true, message: 'Custodian updated successfully' });
+    const updated = await pool.query(
+      `SELECT c.id, u.name, u.email, c.phone, c.location, c.status, c.created_at, c.hostel_id
+         FROM custodians c
+         JOIN users u ON u.id = c.user_id
+        WHERE c.id = $1`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Custodian updated successfully',
+      data: updated.rows[0] || null
+    });
   } catch (e) {
     console.error('Update custodian error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
