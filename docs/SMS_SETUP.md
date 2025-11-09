@@ -42,3 +42,5 @@ When an OTP is generated:
 After configuring the environment variables, restart the backend and trigger a password-reset request. Monitor the logs for `[SmsService]` entries to confirm SMS attempts and responses.
 
 
+
+
