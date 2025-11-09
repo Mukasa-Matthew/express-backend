@@ -102,6 +102,7 @@ router.get('/hostels', async (req, res) => {
         h.contact_phone,
         h.contact_email,
         h.price_per_room,
+        h.booking_fee,
         h.occupancy_type,
         h.distance_from_campus,
         h.amenities,
@@ -254,6 +255,7 @@ router.get('/hostels/:id', async (req, res) => {
         h.contact_phone,
         h.contact_email,
         h.price_per_room,
+        h.booking_fee,
         h.occupancy_type,
         h.distance_from_campus,
         h.amenities,
@@ -261,6 +263,7 @@ router.get('/hostels/:id', async (req, res) => {
         h.latitude,
         h.longitude,
         h.created_at,
+        u.id as university_id,
         u.name as university_name,
         u.code as university_code,
         u.address as university_address,
@@ -428,6 +431,135 @@ router.post('/hostels/:id/inquiry', async (req, res) => {
   }
 });
 
+// Create public booking request (student self-service)
+router.post('/hostels/:id/bookings', async (req, res) => {
+  try {
+    const hostelId = parseInt(req.params.id, 10);
+    const {
+      fullName,
+      email,
+      phone,
+      gender,
+      course,
+      preferredCheckIn,
+      stayDuration,
+      notes,
+      paymentPhone,
+    } = req.body || {};
+
+    if (Number.isNaN(hostelId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid hostel id',
+      });
+    }
+
+    if (!fullName || typeof fullName !== 'string' || !phone || typeof phone !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Full name and phone number are required',
+      });
+    }
+
+    const hostelResult = await pool.query(
+      `
+        SELECT id, name, booking_fee, university_id
+        FROM hostels
+        WHERE id = $1 AND is_published = TRUE
+      `,
+      [hostelId],
+    );
+
+    if (hostelResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Hostel not found or not published',
+      });
+    }
+
+    const hostel = hostelResult.rows[0];
+
+    if (hostel.booking_fee === null || hostel.booking_fee === undefined) {
+      return res.status(409).json({
+        success: false,
+        message:
+          'This hostel has no public booking fee configured yet. Please contact the hostel administrator.',
+      });
+    }
+
+    const parsedCheckIn =
+      typeof preferredCheckIn === 'string' && preferredCheckIn.trim().length > 0
+        ? new Date(preferredCheckIn)
+        : null;
+    const checkInDate =
+      parsedCheckIn && !Number.isNaN(parsedCheckIn.valueOf()) ? parsedCheckIn : null;
+
+    const reference = `RM-${hostelId}-${Date.now()}`;
+
+    const insertQuery = `
+      INSERT INTO public_hostel_bookings (
+        hostel_id,
+        university_id,
+        student_name,
+        student_email,
+        student_phone,
+        gender,
+        course,
+        preferred_check_in,
+        stay_duration,
+        notes,
+        booking_fee,
+        payment_phone,
+        payment_reference,
+        payment_status,
+        status
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending', 'pending'
+      )
+      RETURNING *
+    `;
+
+    const values = [
+      hostel.id,
+      hostel.university_id ?? null,
+      fullName.trim(),
+      email?.trim() || null,
+      phone.trim(),
+      gender?.trim() || null,
+      course?.trim() || null,
+      checkInDate,
+      stayDuration?.trim() || null,
+      notes?.trim() || null,
+      hostel.booking_fee,
+      (paymentPhone || phone).trim(),
+      reference,
+    ];
+
+    const bookingResult = await pool.query(insertQuery, values);
+    const booking = bookingResult.rows[0];
+
+    res.status(201).json({
+      success: true,
+      message:
+        'Booking request received. Complete the payment via the instructions provided to finalize your reservation.',
+      data: {
+        id: booking.id,
+        booking_fee: booking.booking_fee,
+        payment_reference: booking.payment_reference,
+        payment_status: booking.payment_status,
+        status: booking.status,
+        created_at: booking.created_at,
+      },
+    });
+  } catch (error) {
+    console.error('Error creating public booking request:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit booking request',
+    });
+  }
+});
+
 // Get all universities (public endpoint)
 router.get('/universities', async (req, res) => {
   try {
@@ -457,6 +589,177 @@ router.get('/universities', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch universities'
+    });
+  }
+});
+
+// Get all active universities with their published hostels
+router.get('/universities-with-hostels', async (_req, res) => {
+  try {
+    const query = `
+      WITH hostel_availability AS (
+        SELECT
+          h.id AS hostel_id,
+          COUNT(DISTINCT CASE 
+            WHEN r.id IS NOT NULL 
+              AND r.status = 'available'
+              AND (r.capacity - COALESCE(occupant_count.current_occupants, 0)) > 0
+            THEN r.id
+          END) AS available_rooms_count
+        FROM hostels h
+        LEFT JOIN rooms r ON r.hostel_id = h.id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS current_occupants
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id AND sra.status = 'active'
+        ) occupant_count ON true
+        GROUP BY h.id
+      )
+      SELECT 
+        u.id,
+        u.name,
+        u.code,
+        u.address,
+        u.contact_email,
+        u.contact_phone,
+        u.website,
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'id', h.id,
+                'name', h.name,
+                'address', h.address,
+                'description', h.description,
+                'price_per_room', h.price_per_room,
+                'booking_fee', h.booking_fee,
+                'amenities', h.amenities,
+                'distance_from_campus', h.distance_from_campus,
+                'available_rooms', COALESCE(ha.available_rooms_count, 0),
+                'occupancy_type', h.occupancy_type,
+                'primary_image',
+                  (
+                    SELECT image_url
+                    FROM hostel_images
+                    WHERE hostel_id = h.id
+                    ORDER BY is_primary DESC, display_order ASC, created_at ASC
+                    LIMIT 1
+                  ),
+                'latitude', h.latitude,
+                'longitude', h.longitude
+              )
+              ORDER BY h.name ASC
+            )
+            FROM hostels h
+            LEFT JOIN hostel_availability ha ON ha.hostel_id = h.id
+            WHERE h.university_id = u.id AND h.is_published = TRUE
+          ),
+          '[]'::json
+        ) AS hostels
+      FROM universities u
+      WHERE u.status = 'active'
+      ORDER BY u.name ASC
+    `;
+
+    const result = await pool.query(query);
+
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error('Error fetching universities with hostels:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch universities with hostels',
+    });
+  }
+});
+
+// Get published hostels for a specific university
+router.get('/universities/:id/hostels', async (req, res) => {
+  try {
+    const universityId = parseInt(req.params.id, 10);
+    if (Number.isNaN(universityId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid university id',
+      });
+    }
+
+    const universityQuery = `
+      SELECT id, name, code, address, contact_email, contact_phone, website
+      FROM universities
+      WHERE id = $1 AND status = 'active'
+    `;
+    const universityResult = await pool.query(universityQuery, [universityId]);
+
+    if (universityResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'University not found',
+      });
+    }
+
+    const hostelsQuery = `
+      WITH hostel_availability AS (
+        SELECT
+          h.id AS hostel_id,
+          COUNT(DISTINCT CASE 
+            WHEN r.id IS NOT NULL 
+              AND r.status = 'available'
+              AND (r.capacity - COALESCE(occupant_count.current_occupants, 0)) > 0
+            THEN r.id
+          END) AS available_rooms_count
+        FROM hostels h
+        LEFT JOIN rooms r ON r.hostel_id = h.id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS current_occupants
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id AND sra.status = 'active'
+        ) occupant_count ON true
+        GROUP BY h.id
+      )
+      SELECT
+        h.id,
+        h.name,
+        h.address,
+        h.description,
+        h.price_per_room,
+        h.booking_fee,
+        h.amenities,
+        h.distance_from_campus,
+        h.occupancy_type,
+        COALESCE(ha.available_rooms_count, 0) AS available_rooms,
+        (
+          SELECT image_url
+          FROM hostel_images
+          WHERE hostel_id = h.id
+          ORDER BY is_primary DESC, display_order ASC, created_at ASC
+          LIMIT 1
+        ) AS primary_image,
+        h.latitude,
+        h.longitude
+      FROM hostels h
+      LEFT JOIN hostel_availability ha ON ha.hostel_id = h.id
+      WHERE h.university_id = $1 AND h.is_published = TRUE
+      ORDER BY h.name ASC
+    `;
+
+    const hostelsResult = await pool.query(hostelsQuery, [universityId]);
+
+    res.json({
+      success: true,
+      data: {
+        university: universityResult.rows[0],
+        hostels: hostelsResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching hostels for university:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch hostels for university',
     });
   }
 });

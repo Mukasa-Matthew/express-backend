@@ -19,6 +19,7 @@ export interface Hostel {
   price_per_room?: number | null;
   rules_and_regulations?: string | null;
   occupancy_type?: 'male' | 'female' | 'mixed' | null;
+  booking_fee?: number | null;
   current_subscription_id?: number | null;
   created_at: Date;
   updated_at: Date;
@@ -36,6 +37,10 @@ export interface CreateHostelData {
   university_id?: number;
   region_id?: number;
   occupancy_type?: 'male' | 'female' | 'mixed';
+  amenities?: string;
+  price_per_room?: number;
+  distance_from_campus?: number;
+  booking_fee?: number;
 }
 
 export interface CreateHostelWithAdminData extends CreateHostelData {
@@ -60,11 +65,18 @@ function prismaHostelToHostel(prismaHostel: PrismaHostel): Hostel {
     status: prismaHostel.status as Hostel['status'],
     university_id: prismaHostel.universityId,
     region_id: prismaHostel.regionId,
-    distance_from_campus: prismaHostel.distanceFromCampus ? Number(prismaHostel.distanceFromCampus) : null,
+    distance_from_campus:
+      prismaHostel.distanceFromCampus !== null && prismaHostel.distanceFromCampus !== undefined
+        ? Number(prismaHostel.distanceFromCampus)
+        : null,
     amenities: prismaHostel.amenities,
     price_per_room: prismaHostel.pricePerRoom,
     rules_and_regulations: prismaHostel.rulesAndRegulations,
     occupancy_type: prismaHostel.occupancyType as Hostel['occupancy_type'],
+    booking_fee:
+      prismaHostel.bookingFee !== null && prismaHostel.bookingFee !== undefined
+        ? Number(prismaHostel.bookingFee)
+        : null,
     current_subscription_id: prismaHostel.currentSubscriptionId,
     created_at: prismaHostel.createdAt,
     updated_at: prismaHostel.updatedAt,
@@ -84,6 +96,10 @@ export class HostelModel {
       status,
       university_id,
       occupancy_type,
+      amenities,
+      price_per_room,
+      distance_from_campus,
+      booking_fee,
     } = hostelData;
 
     const prismaHostel = await prisma.hostel.create({
@@ -98,6 +114,16 @@ export class HostelModel {
         status: (status || 'active') as PrismaHostel['status'],
         universityId: university_id || null,
         occupancyType: occupancy_type || null,
+        amenities: amenities || null,
+        pricePerRoom: price_per_room ?? null,
+        distanceFromCampus:
+          distance_from_campus !== undefined && distance_from_campus !== null
+            ? new Prisma.Decimal(distance_from_campus)
+            : null,
+        bookingFee:
+          booking_fee !== undefined && booking_fee !== null
+            ? Math.round(Number(booking_fee))
+            : null,
       },
     });
 
@@ -148,6 +174,20 @@ export class HostelModel {
       }
     }
     if (hostelData.occupancy_type !== undefined) prismaUpdateData.occupancyType = hostelData.occupancy_type || null;
+    if (hostelData.amenities !== undefined) prismaUpdateData.amenities = hostelData.amenities || null;
+    if (hostelData.price_per_room !== undefined) prismaUpdateData.pricePerRoom = hostelData.price_per_room ?? null;
+    if (hostelData.distance_from_campus !== undefined) {
+      prismaUpdateData.distanceFromCampus =
+        hostelData.distance_from_campus !== null && hostelData.distance_from_campus !== undefined
+          ? new Prisma.Decimal(hostelData.distance_from_campus)
+          : null;
+    }
+    if (hostelData.booking_fee !== undefined) {
+      prismaUpdateData.bookingFee =
+        hostelData.booking_fee !== null && hostelData.booking_fee !== undefined
+          ? Math.round(Number(hostelData.booking_fee))
+          : null;
+    }
 
     const prismaHostel = await prisma.hostel.update({
       where: { id },

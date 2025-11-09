@@ -34,3 +34,8 @@ pm2 logs express-backend --lines 1000 --nostream | grep -B 10 -A 20 "mageziricha
 
 
 
+
+
+
+
+

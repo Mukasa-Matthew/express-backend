@@ -17,6 +17,8 @@ interface PaymentTableInfo {
   hasSemesterIdColumn: boolean;
   currencyColumn: string | null;
   purposeColumn: string | null;
+  primaryDateColumn: string | null;
+  createdAtColumn: string | null;
 }
 
 let paymentTableInfoCache: PaymentTableInfo | null = null;
@@ -42,20 +44,47 @@ async function getPaymentTableInfo(): Promise<PaymentTableInfo> {
     ? 'notes'
     : null;
 
+  const primaryDateColumn = columns.includes('payment_date')
+    ? 'payment_date'
+    : columns.includes('paid_at')
+    ? 'paid_at'
+    : columns.includes('date')
+    ? 'date'
+    : null;
+  const createdAtColumn = columns.includes('created_at') ? 'created_at' : null;
+
   paymentTableInfoCache = {
     userIdColumn,
     hasHostelIdColumn: columns.includes('hostel_id'),
     hasSemesterIdColumn: columns.includes('semester_id'),
     currencyColumn: columns.includes('currency') ? 'currency' : null,
     purposeColumn,
+    primaryDateColumn,
+    createdAtColumn,
   };
 
   return paymentTableInfoCache;
 }
 
+function buildPaymentDateExpression(info: PaymentTableInfo): string {
+  const { primaryDateColumn, createdAtColumn } = info;
+  if (primaryDateColumn && createdAtColumn && primaryDateColumn !== createdAtColumn) {
+    return `COALESCE(p.${primaryDateColumn}, p.${createdAtColumn})`;
+  }
+  if (primaryDateColumn) {
+    return `p.${primaryDateColumn}`;
+  }
+  if (createdAtColumn) {
+    return `p.${createdAtColumn}`;
+  }
+  return 'CURRENT_DATE';
+}
+
 interface StudentRoomAssignmentInfo {
   userIdColumn: string;
   hasSemesterColumn: boolean;
+  assignmentDateColumn: string | null;
+  createdAtColumn: string | null;
 }
 
 let studentRoomAssignmentInfoCache: StudentRoomAssignmentInfo | null = null;
@@ -71,6 +100,11 @@ async function getStudentRoomAssignmentInfo(): Promise<StudentRoomAssignmentInfo
   `);
   const columns = res.rows.map((r) => r.column_name);
 
+  const preferredAssignmentColumns = ['assignment_date', 'assigned_at', 'start_date'];
+  const assignmentDateColumn =
+    preferredAssignmentColumns.find((col) => columns.includes(col)) || null;
+  const createdAtColumn = columns.includes('created_at') ? 'created_at' : null;
+
   studentRoomAssignmentInfoCache = {
     userIdColumn: columns.includes('user_id')
       ? 'user_id'
@@ -78,9 +112,83 @@ async function getStudentRoomAssignmentInfo(): Promise<StudentRoomAssignmentInfo
       ? 'student_id'
       : 'user_id',
     hasSemesterColumn: columns.includes('semester_id'),
+    assignmentDateColumn,
+    createdAtColumn,
   };
 
   return studentRoomAssignmentInfoCache;
+}
+
+interface RoomTableInfo {
+  priceColumn: string | null;
+}
+
+let roomTableInfoCache: RoomTableInfo | null = null;
+
+interface RoomPriceExpressions {
+  selectExpr: string | null;
+  sumExpr: string;
+  singleExpr: string;
+}
+
+async function getRoomTableInfo(): Promise<RoomTableInfo> {
+  if (roomTableInfoCache) return roomTableInfoCache;
+
+  const res = await pool.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'rooms'
+  `);
+  const columns = res.rows.map((r) => r.column_name);
+
+  const preferredPriceColumns = [
+    'price',
+    'price_per_room',
+    'price_per_semester',
+    'total_price',
+    'price_per_month',
+  ];
+
+  const priceColumn = preferredPriceColumns.find((col) => columns.includes(col)) || null;
+
+  roomTableInfoCache = { priceColumn };
+
+  if (!priceColumn) {
+    console.warn(
+      '⚠️  rooms table price column not found. Outstanding balance calculations will default to 0 until a price column is added.'
+    );
+  }
+
+  return roomTableInfoCache;
+}
+
+async function getRoomPriceExpressions(): Promise<RoomPriceExpressions> {
+  const roomInfo = await getRoomTableInfo();
+  const selectExpr = roomInfo.priceColumn ? `rm.${roomInfo.priceColumn}::numeric` : null;
+  return {
+    selectExpr,
+    sumExpr: selectExpr ?? '0::numeric',
+    singleExpr: selectExpr ?? 'NULL::numeric',
+  };
+}
+
+function applyRoomPriceSum(sql: string, sumExpr: string): string {
+  return sql.replace(/__ROOM_PRICE_SUM__/g, sumExpr);
+}
+
+function createRoomPriceInjector(sumExpr: string) {
+  return (sql: string) => applyRoomPriceSum(sql, sumExpr);
+}
+
+function buildAssignmentDateExpression(info: StudentRoomAssignmentInfo): string {
+  if (info.assignmentDateColumn) {
+    return `COALESCE(sra.${info.assignmentDateColumn}, CURRENT_DATE)`;
+  }
+  if (info.createdAtColumn) {
+    return `COALESCE(sra.${info.createdAtColumn}, CURRENT_DATE)`;
+  }
+  return 'CURRENT_DATE';
 }
 
 async function resolveHostelIdForUser(userId: number, role: string): Promise<number | null> {
@@ -126,11 +234,12 @@ router.post('/', async (req: Request, res) => {
 
     const paymentInfo = await getPaymentTableInfo();
     const sraInfo = await getStudentRoomAssignmentInfo();
+    const { singleExpr: roomExpectedPriceExpr } = await getRoomPriceExpressions();
 
     // Determine active assignment and expected room price
     const roomParams: any[] = [user_id, hostelId];
     let roomQuery = `
-      SELECT rm.room_number, rm.price::numeric AS expected_price
+      SELECT rm.room_number, ${roomExpectedPriceExpr} AS expected_price
       FROM student_room_assignments sra
       JOIN rooms rm ON rm.id = sra.room_id
       WHERE sra.${sraInfo.userIdColumn} = $1
@@ -358,6 +467,9 @@ router.get('/summary', async (req, res) => {
 
     const paymentInfo = await getPaymentTableInfo();
     const sraInfo = await getStudentRoomAssignmentInfo();
+    const { sumExpr: roomPriceForSum, singleExpr: roomPriceForSingle } = await getRoomPriceExpressions();
+    const injectRoomPrice = createRoomPriceInjector(roomPriceForSum);
+    const assignmentDateExpr = buildAssignmentDateExpression(sraInfo);
     
     // Total collected (filtered by semester if provided)
     let totalPaidQuery: string;
@@ -388,17 +500,18 @@ router.get('/summary', async (req, res) => {
 
     // Per-student expected vs paid (with optional semester filtering)
     const assignmentFilter = semesterId && sraInfo.hasSemesterColumn ? 'AND sra.semester_id = $2' : '';
-    const paymentFilter =
-      semesterId && paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $3' : '';
+    const buildSemesterFilter = (alias: string) =>
+      semesterId && paymentInfo.hasSemesterIdColumn ? `AND ${alias}.semester_id = $3` : '';
     
     let paidSubquery: string;
     if (paymentInfo.hasHostelIdColumn) {
+      const alias = 'p';
       paidSubquery = `
-        SELECT ${paymentInfo.userIdColumn} AS user_id, COALESCE(SUM(amount),0)::numeric AS paid
-        FROM payments
-        WHERE hostel_id = $1
-        ${paymentFilter}
-        GROUP BY ${paymentInfo.userIdColumn}
+        SELECT ${alias}.${paymentInfo.userIdColumn} AS user_id, COALESCE(SUM(${alias}.amount),0)::numeric AS paid
+        FROM payments ${alias}
+        WHERE ${alias}.hostel_id = $1
+        ${buildSemesterFilter(alias)}
+        GROUP BY ${alias}.${paymentInfo.userIdColumn}
       `;
     } else {
       paidSubquery = `
@@ -406,7 +519,7 @@ router.get('/summary', async (req, res) => {
         FROM payments p
         JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
         WHERE u.hostel_id = $1
-        ${paymentFilter}
+        ${buildSemesterFilter('p')}
         GROUP BY p.${paymentInfo.userIdColumn}
       `;
     }
@@ -438,8 +551,8 @@ router.get('/summary', async (req, res) => {
       : [hostelId, hostelId];
     
     const rowsRes = await pool.query(
-      `WITH active_assignment AS (
-        SELECT sra.${sraInfo.userIdColumn} AS user_id, rm.price::numeric AS expected, rm.room_number
+      injectRoomPrice(`WITH active_assignment AS (
+        SELECT sra.${sraInfo.userIdColumn} AS user_id, ${roomPriceForSingle} AS expected, rm.room_number
         FROM student_room_assignments sra
         JOIN rooms rm ON rm.id = sra.room_id
         WHERE sra.status = 'active' AND rm.hostel_id = $1
@@ -458,7 +571,7 @@ router.get('/summary', async (req, res) => {
       LEFT JOIN active_assignment aa ON aa.user_id = u.id
       LEFT JOIN paid p ON p.user_id = u.id
       WHERE u.role = 'user' AND u.hostel_id = ${semesterId ? '$4' : '$2'}
-      ORDER BY u.name ASC`,
+      ORDER BY u.name ASC`),
       queryParams
     );
 
@@ -506,6 +619,9 @@ router.get('/summary/semesters', async (req, res) => {
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
 
     const paymentInfo = await getPaymentTableInfo();
+    const sraInfo = await getStudentRoomAssignmentInfo();
+    const { sumExpr: roomPriceForSum } = await getRoomPriceExpressions();
+    const injectRoomPrice = createRoomPriceInjector(roomPriceForSum);
 
     const paymentTotalsCte = paymentInfo.hasHostelIdColumn
       ? `
@@ -523,7 +639,7 @@ router.get('/summary/semesters', async (req, res) => {
       `;
 
     const expectedTotalsCte = `
-      SELECT sra.semester_id, COALESCE(SUM(rm.price)::numeric,0) AS total_expected
+      SELECT sra.semester_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM student_room_assignments sra
       JOIN rooms rm ON rm.id = sra.room_id
       WHERE rm.hostel_id = $1
@@ -595,6 +711,7 @@ router.get('/summary/global', async (req, res) => {
     if (currentUser.role !== 'super_admin') return res.status(403).json({ success: false, message: 'Forbidden' });
 
     const paymentInfo = await getPaymentTableInfo();
+    const { sumExpr: roomPriceForSum } = await getRoomPriceExpressions();
 
     const paymentTotalsCte = paymentInfo.hasHostelIdColumn
       ? `
@@ -612,7 +729,7 @@ router.get('/summary/global', async (req, res) => {
       `;
 
     const expectedTotalsCte = `
-      SELECT rm.hostel_id, COALESCE(SUM(rm.price)::numeric,0) AS total_expected
+      SELECT rm.hostel_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM student_room_assignments sra
       JOIN rooms rm ON rm.id = sra.room_id
       WHERE rm.hostel_id IS NOT NULL
@@ -643,7 +760,7 @@ router.get('/summary/global', async (req, res) => {
       `;
 
     const currentExpectedTotalsCte = `
-      SELECT cs.hostel_id, COALESCE(SUM(rm.price)::numeric,0) AS total_expected
+      SELECT cs.hostel_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM current_semesters cs
       JOIN student_room_assignments sra ON sra.semester_id = cs.semester_id
       JOIN rooms rm ON rm.id = sra.room_id
@@ -876,6 +993,7 @@ router.get('/summary/hostel', async (req, res) => {
     const months = Number.isFinite(monthsParam) && monthsParam > 0 ? Math.min(Math.trunc(monthsParam), 12) : 6;
     const paymentInfo = await getPaymentTableInfo();
     const sraInfo = await getStudentRoomAssignmentInfo();
+    const assignmentDateExpr = buildAssignmentDateExpression(sraInfo);
 
     const expensesColumnsRes = await pool.query(
       `
@@ -898,13 +1016,16 @@ router.get('/summary/hostel', async (req, res) => {
       ? 'COALESCE(e.created_at, CURRENT_DATE)'
       : 'CURRENT_DATE';
 
-    const dateExpr = 'COALESCE(p.payment_date, p.created_at)';
+    const dateExpr = buildPaymentDateExpression(paymentInfo);
     const totalCollectedQuery = paymentInfo.hasHostelIdColumn
       ? `SELECT COALESCE(SUM(amount),0)::numeric AS total FROM payments WHERE hostel_id = $1`
       : `SELECT COALESCE(SUM(p.amount),0)::numeric AS total
          FROM payments p
          JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
          WHERE u.hostel_id = $1`;
+
+    const { sumExpr: roomPriceForSum } = await getRoomPriceExpressions();
+    const injectRoomPrice = createRoomPriceInjector(roomPriceForSum);
 
     const [
       totalCollectedRes,
@@ -919,11 +1040,14 @@ router.get('/summary/hostel', async (req, res) => {
     ] = await Promise.all([
       pool.query(totalCollectedQuery, [hostelId]),
       pool.query(
-        `SELECT COALESCE(SUM(rm.price)::numeric,0) AS total
+        injectRoomPrice(
+          `
+         SELECT COALESCE(SUM(__ROOM_PRICE_SUM__),0) AS total
          FROM student_room_assignments sra
          JOIN rooms rm ON rm.id = sra.room_id
          WHERE rm.hostel_id = $1
-           AND sra.status IN ('active','completed')`,
+           AND sra.status IN ('active','completed')`
+        ),
         [hostelId]
       ),
       pool.query(
@@ -959,17 +1083,19 @@ router.get('/summary/hostel', async (req, res) => {
         [hostelId]
       ),
       pool.query(
-        `
-          SELECT to_char(date_trunc('month', COALESCE(sra.assignment_date, sra.created_at, CURRENT_DATE)), 'YYYY-MM') AS period,
-                 SUM(rm.price)::numeric AS expected
+        injectRoomPrice(
+          `
+          SELECT to_char(date_trunc('month', ${assignmentDateExpr}), 'YYYY-MM') AS period,
+                 COALESCE(SUM(__ROOM_PRICE_SUM__),0)::numeric AS expected
           FROM student_room_assignments sra
           JOIN rooms rm ON rm.id = sra.room_id
           WHERE rm.hostel_id = $1
             AND sra.status IN ('active','completed')
-            AND COALESCE(sra.assignment_date, sra.created_at, CURRENT_DATE) >= date_trunc('month', CURRENT_DATE) - INTERVAL '${months - 1} month'
+            AND ${assignmentDateExpr} >= date_trunc('month', CURRENT_DATE) - INTERVAL '${months - 1} month'
           GROUP BY period
           ORDER BY period ASC
-        `,
+        `
+        ),
         [hostelId]
       ),
       hasExpensesTable
@@ -1013,10 +1139,11 @@ router.get('/summary/hostel', async (req, res) => {
       ),
       pool.query(
         paymentInfo.hasHostelIdColumn
-          ? `
+          ? injectRoomPrice(
+              `
             SELECT u.name,
                    u.email,
-                   COALESCE(SUM(rm.price)::numeric,0) - COALESCE(SUM(p.amount)::numeric,0) AS outstanding
+                   COALESCE(SUM(__ROOM_PRICE_SUM__),0) - COALESCE(SUM(p.amount)::numeric,0) AS outstanding
             FROM student_room_assignments sra
             JOIN rooms rm ON rm.id = sra.room_id
             JOIN users u ON u.id = sra.${sraInfo.userIdColumn}
@@ -1024,14 +1151,15 @@ router.get('/summary/hostel', async (req, res) => {
             WHERE rm.hostel_id = $1
               AND sra.status IN ('active','completed')
             GROUP BY u.id, u.name, u.email
-            HAVING COALESCE(SUM(rm.price)::numeric,0) - COALESCE(SUM(p.amount)::numeric,0) > 0
+            HAVING COALESCE(SUM(__ROOM_PRICE_SUM__),0) - COALESCE(SUM(p.amount)::numeric,0) > 0
             ORDER BY outstanding DESC
             LIMIT 5
-          `
-          : `
+          `)
+          : injectRoomPrice(
+              `
             SELECT u.name,
                    u.email,
-                   COALESCE(SUM(rm.price)::numeric,0) - COALESCE(SUM(p.amount)::numeric,0) AS outstanding
+                   COALESCE(SUM(__ROOM_PRICE_SUM__),0) - COALESCE(SUM(p.amount)::numeric,0) AS outstanding
             FROM student_room_assignments sra
             JOIN rooms rm ON rm.id = sra.room_id
             JOIN users u ON u.id = sra.${sraInfo.userIdColumn}
@@ -1039,16 +1167,18 @@ router.get('/summary/hostel', async (req, res) => {
             WHERE rm.hostel_id = $1
               AND sra.status IN ('active','completed')
             GROUP BY u.id, u.name, u.email
-            HAVING COALESCE(SUM(rm.price)::numeric,0) - COALESCE(SUM(p.amount)::numeric,0) > 0
+            HAVING COALESCE(SUM(__ROOM_PRICE_SUM__),0) - COALESCE(SUM(p.amount)::numeric,0) > 0
             ORDER BY outstanding DESC
             LIMIT 5
-          `,
+          `),
         [hostelId]
       ),
     ]);
 
-    const totalCollected = parseFloat(totalCollectedRes.rows[0]?.total || 0);
-    const totalExpected = parseFloat(totalExpectedRes.rows[0]?.total || 0);
+    const totalCollectedRow = totalCollectedRes.rows[0] as { total?: number | string } | undefined;
+    const totalExpectedRow = totalExpectedRes.rows[0] as { total?: number | string } | undefined;
+    const totalCollected = parseFloat(totalCollectedRow?.total?.toString() ?? '0');
+    const totalExpected = parseFloat(totalExpectedRow?.total?.toString() ?? '0');
     const totalOutstanding = totalExpected - totalCollected;
     const totalExpenses = parseFloat(expensesTotalRes.rows[0]?.total || 0);
     const netRevenue = totalCollected - totalExpenses;
@@ -1070,7 +1200,7 @@ router.get('/summary/hostel', async (req, res) => {
       currentCollected = parseFloat(currentCollectedRes.rows[0]?.total || 0);
 
       const currentExpectedRes = await pool.query(
-        `SELECT COALESCE(SUM(rm.price)::numeric,0) AS total
+        `SELECT COALESCE(SUM(${roomPriceForSum}),0) AS total
          FROM student_room_assignments sra
          JOIN rooms rm ON rm.id = sra.room_id
          WHERE rm.hostel_id = $1
@@ -1078,33 +1208,34 @@ router.get('/summary/hostel', async (req, res) => {
            AND sra.semester_id = $2`,
         [hostelId, currentSemesterRow.id]
       );
-      currentExpected = parseFloat(currentExpectedRes.rows[0]?.total || 0);
+      const currentExpectedRow = currentExpectedRes.rows[0] as { total?: number | string } | undefined;
+      currentExpected = parseFloat(currentExpectedRow?.total?.toString() ?? '0');
     }
 
     const trendMap: Record<
       string,
       { period: string; collected: number; expected: number; expenses: number }
     > = {};
-    paymentsTrendRes.rows.forEach((row) => {
-      const period = row.period;
+    paymentsTrendRes.rows.forEach((row: any) => {
+      const period = row.period as string;
       if (!trendMap[period]) {
         trendMap[period] = { period, collected: 0, expected: 0, expenses: 0 };
       }
-      trendMap[period].collected = parseFloat(row.collected || 0);
+      trendMap[period].collected = parseFloat(row.collected?.toString() ?? '0');
     });
-    expectedTrendRes.rows.forEach((row) => {
-      const period = row.period;
+    expectedTrendRes.rows.forEach((row: any) => {
+      const period = row.period as string;
       if (!trendMap[period]) {
         trendMap[period] = { period, collected: 0, expected: 0, expenses: 0 };
       }
-      trendMap[period].expected = parseFloat(row.expected || 0);
+      trendMap[period].expected = parseFloat(row.expected?.toString() ?? '0');
     });
-    expensesTrendRes.rows.forEach((row) => {
-      const period = row.period;
+    expensesTrendRes.rows.forEach((row: any) => {
+      const period = row.period as string;
       if (!trendMap[period]) {
         trendMap[period] = { period, collected: 0, expected: 0, expenses: 0 };
       }
-      trendMap[period].expenses = parseFloat(row.expenses || 0);
+      trendMap[period].expenses = parseFloat(row.expenses?.toString() ?? '0');
     });
 
     const trend = Object.values(trendMap).sort((a, b) => a.period.localeCompare(b.period));
@@ -1138,11 +1269,13 @@ router.get('/summary/hostel', async (req, res) => {
           email: row.email,
           collected: parseFloat(row.total_paid || 0),
         })),
-        outstanding_students: outstandingStudentsRes.rows.map((row) => ({
-          name: row.name,
-          email: row.email,
-          outstanding: parseFloat(row.outstanding || 0),
-        })),
+        outstanding_students: (outstandingStudentsRes.rows as Array<{ name?: string; email?: string; outstanding?: number | string }>).map(
+          (row) => ({
+            name: row.name ?? '',
+            email: row.email ?? '',
+            outstanding: parseFloat(row.outstanding?.toString() ?? '0'),
+          })
+        ),
       },
     });
   } catch (e) {

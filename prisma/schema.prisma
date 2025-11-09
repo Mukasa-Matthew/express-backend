@@ -40,6 +40,7 @@ model University {
   region   Region?  @relation(fields: [regionId], references: [id])
   hostels  Hostel[]
   users    User[]
+  publicBookings PublicHostelBooking[]
   
   @@map("universities")
 }
@@ -65,6 +66,7 @@ model Hostel {
   isPublished           Boolean   @default(false) @map("is_published")
   latitude              Decimal?  @db.Decimal(10, 8)
   longitude             Decimal?  @db.Decimal(11, 8)
+  bookingFee            Int?      @map("booking_fee")
   currentSubscriptionId Int?      @map("current_subscription_id")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
@@ -79,6 +81,7 @@ model Hostel {
   subscriptions   HostelSubscription[]
   semesters       Semester[]
   images          HostelImage[]
+  publicBookings  PublicHostelBooking[]
   currentSubscription HostelSubscription? @relation("HostelCurrentSubscription", fields: [currentSubscriptionId], references: [id])
   
   @@index([isPublished], map: "idx_hostels_is_published")
@@ -375,6 +378,35 @@ model HostelImage {
   
   @@index([hostelId], map: "idx_hostel_images_hostel_id")
   @@map("hostel_images")
+}
+
+model PublicHostelBooking {
+  id               Int       @id @default(autoincrement())
+  hostelId         Int       @map("hostel_id")
+  universityId     Int?      @map("university_id")
+  studentName      String    @map("student_name") @db.VarChar(255)
+  studentEmail     String?   @map("student_email") @db.VarChar(255)
+  studentPhone     String    @map("student_phone") @db.VarChar(30)
+  gender           String?   @db.VarChar(20)
+  course           String?   @db.VarChar(100)
+  preferredCheckIn DateTime? @map("preferred_check_in")
+  stayDuration     String?   @map("stay_duration") @db.VarChar(100)
+  notes            String?   @db.Text
+  bookingFee       Int       @map("booking_fee")
+  paymentPhone     String?   @map("payment_phone") @db.VarChar(30)
+  paymentReference String?   @map("payment_reference") @db.VarChar(100)
+  paymentStatus    String    @default("pending") @map("payment_status") @db.VarChar(50)
+  status           String    @default("pending") @db.VarChar(50)
+  confirmedAt      DateTime? @map("confirmed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  hostel      Hostel     @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  university  University? @relation(fields: [universityId], references: [id])
+
+  @@index([hostelId], map: "idx_public_bookings_hostel_id")
+  @@index([universityId], map: "idx_public_bookings_university_id")
+  @@map("public_hostel_bookings")
 }
 
 // Audit Logs table

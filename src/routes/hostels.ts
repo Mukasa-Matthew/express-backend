@@ -260,7 +260,8 @@ router.get('/:id', async (req, res) => {
       SELECT 
         h.id, h.name, h.address, h.description, h.status, h.total_rooms,
         h.contact_phone, h.contact_email, h.university_id, h.created_at,
-        h.is_published, h.latitude, h.longitude,
+        h.is_published, h.latitude, h.longitude, h.booking_fee,
+        h.price_per_room, h.amenities, h.distance_from_campus, h.occupancy_type,
         u.name as admin_name, u.email as admin_email,
         hs.id as subscription_id, hs.status as subscription_status, hs.start_date, hs.end_date,
         hs.amount_paid, sp.name as plan_name,
@@ -293,6 +294,10 @@ router.get('/:id', async (req, res) => {
       status: row.status,
       total_rooms: row.total_rooms,
       available_rooms: row.available_rooms,
+      price_per_room: row.price_per_room,
+      amenities: row.amenities,
+      distance_from_campus: row.distance_from_campus !== null ? Number(row.distance_from_campus) : null,
+      occupancy_type: row.occupancy_type,
       contact_phone: row.contact_phone,
       contact_email: row.contact_email,
       university_id: row.university_id,
@@ -300,6 +305,7 @@ router.get('/:id', async (req, res) => {
       is_published: row.is_published || false,
       latitude: row.latitude,
       longitude: row.longitude,
+      booking_fee: row.booking_fee,
       created_at: row.created_at,
       admin: row.admin_name ? {
         name: row.admin_name,
@@ -598,6 +604,31 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
+    const authResult = await verifyTokenAndGetUser(req);
+
+    if (!authResult) {
+      return res.status(401).json({
+        success: false,
+        message: 'No token provided or invalid token',
+      });
+    }
+
+    if (authResult.role !== 'super_admin') {
+      if (authResult.role === 'hostel_admin') {
+        if (!authResult.user.hostel_id || authResult.user.hostel_id !== id) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: Hostel admins can only update their own hostels',
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Only super admins or assigned hostel admins can update hostels',
+        });
+      }
+    }
+
     const updateData = req.body;
 
     const hostel = await HostelModel.update(id, updateData);
