@@ -635,22 +635,35 @@ router.post('/forgot-password', async (req, res) => {
       );
     }
 
-    // Send OTP email
-    try {
-      const emailHtml = EmailService.generatePasswordResetOTPEmail(user.name, otp);
-      
-      await EmailService.sendEmail({
-        to: user.email,
-        subject: 'Password Reset OTP - LTS Portal',
-        html: emailHtml
-      });
-    } catch (emailError) {
-      console.error('Error sending password reset OTP email:', emailError);
-      // Don't fail the request if email fails
-    }
+    // Launch OTP notifications without blocking the response
+    const notificationTasks: Promise<unknown>[] = [];
 
-    // Send OTP via SMS (if configured and phone number available)
-    await SmsService.sendPasswordResetOtp(user, otp);
+    notificationTasks.push(
+      (async () => {
+        try {
+          const emailHtml = EmailService.generatePasswordResetOTPEmail(
+            user.name,
+            otp
+          );
+
+          await EmailService.sendEmail({
+            to: user.email,
+            subject: 'Password Reset OTP - LTS Portal',
+            html: emailHtml,
+          });
+        } catch (emailError) {
+          console.error('Error sending password reset OTP email:', emailError);
+        }
+      })()
+    );
+
+    notificationTasks.push(
+      SmsService.sendPasswordResetOtp(user, otp).catch((err) => {
+        console.error('Error sending password reset OTP SMS:', err);
+      })
+    );
+
+    void Promise.allSettled(notificationTasks);
 
     res.json({ 
       success: true, 
