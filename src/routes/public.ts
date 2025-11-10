@@ -637,6 +637,7 @@ router.get('/universities-with-hostels', async (_req, res) => {
                 'distance_from_campus', h.distance_from_campus,
                 'available_rooms', COALESCE(ha.available_rooms_count, 0),
                 'occupancy_type', h.occupancy_type,
+                'is_published', h.is_published,
                 'primary_image',
                   (
                     SELECT image_url
@@ -652,7 +653,7 @@ router.get('/universities-with-hostels', async (_req, res) => {
             )
             FROM hostels h
             LEFT JOIN hostel_availability ha ON ha.hostel_id = h.id
-            WHERE h.university_id = u.id AND h.is_published = TRUE
+            WHERE h.university_id = u.id AND h.status = 'active'
           ),
           '[]'::json
         ) AS hostels
@@ -731,6 +732,7 @@ router.get('/universities/:id/hostels', async (req, res) => {
         h.distance_from_campus,
         h.occupancy_type,
         COALESCE(ha.available_rooms_count, 0) AS available_rooms,
+        h.is_published,
         (
           SELECT image_url
           FROM hostel_images
@@ -742,7 +744,7 @@ router.get('/universities/:id/hostels', async (req, res) => {
         h.longitude
       FROM hostels h
       LEFT JOIN hostel_availability ha ON ha.hostel_id = h.id
-      WHERE h.university_id = $1 AND h.is_published = TRUE
+      WHERE h.university_id = $1 AND h.status = 'active'
       ORDER BY h.name ASC
     `;
 

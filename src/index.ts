@@ -70,9 +70,11 @@ const getCorsOrigins = (): string[] | string => {
   // Development: Allow localhost on common ports and production frontend
   return [
     'http://localhost:3000',
+    'http://localhost:3001',
     'http://localhost:5173', // Vite default
     'http://localhost:5174',
     'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
     'http://127.0.0.1:5173',
     'http://64.23.169.136', // Production frontend
     'http://64.23.169.136:3000', // Production frontend on port 3000
