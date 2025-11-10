@@ -44,9 +44,12 @@ const DEFAULT_PUBLIC_ORIGINS = [
   'https://www.martomor.xyz',
   'http://martomor.xyz',
   'http://www.martomor.xyz',
-  'https://roomio-weapp.vercel.app',
+  'https://roomiohostels.netlify.app',
+  'https://chatgpt.com',
+  'https://www.chatgpt.com',
   'http://64.23.169.136',
   'http://64.23.169.136:3000',
+  'https://roomiohostels.netlify.app',
   'http://64.23.169.136:80',
 ];
 
