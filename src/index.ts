@@ -64,6 +64,7 @@ const getCorsOrigins = (): string[] | string => {
       'http://64.23.169.136',
       'http://64.23.169.136:3000',
       'http://64.23.169.136:80',
+      'https://roomio-weapp.vercel.app',
     ];
   }
   
