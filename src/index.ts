@@ -39,51 +39,70 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
+const DEFAULT_PUBLIC_ORIGINS = [
+  'https://martomor.xyz',
+  'https://www.martomor.xyz',
+  'http://martomor.xyz',
+  'http://www.martomor.xyz',
+  'https://roomio-weapp.vercel.app',
+  'http://64.23.169.136',
+  'http://64.23.169.136:3000',
+  'http://64.23.169.136:80',
+];
+
+const DEFAULT_DEV_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:3030',
+  'http://localhost:5173', // Vite default
+  'http://localhost:5174',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'http://127.0.0.1:3030',
+  'http://127.0.0.1:5173',
+];
+
+const dedupeOrigins = (origins: string[]) =>
+  Array.from(new Set(origins.filter(Boolean)));
+
 // CORS Configuration: Support multiple frontend origins
 const getCorsOrigins = (): string[] | string => {
   const allowedOrigins = process.env.FRONTEND_URLS;
-  
+
   // If FRONTEND_URLS is set, parse it (comma-separated list)
   if (allowedOrigins) {
-    const origins = allowedOrigins.split(',').map(url => url.trim()).filter(Boolean);
-    if (origins.length > 0) {
-      return origins;
+    const origins = allowedOrigins
+      .split(',')
+      .map(url => url.trim())
+      .filter(Boolean);
+
+    if (process.env.FRONTEND_URL) {
+      origins.push(process.env.FRONTEND_URL.trim());
+    }
+
+    const merged = dedupeOrigins([...origins, ...DEFAULT_PUBLIC_ORIGINS]);
+    if (merged.length > 0) {
+      return merged;
     }
   }
-  
+
   // Default: In development, allow localhost; in production, use environment variable
   if (process.env.NODE_ENV === 'production') {
     // In production, require FRONTEND_URLS to be set
     const productionUrl = process.env.FRONTEND_URL;
     if (productionUrl) {
-      return [productionUrl];
+      return dedupeOrigins([productionUrl, ...DEFAULT_PUBLIC_ORIGINS]);
     }
     // If not set, include production frontend as fallback
     // WARNING: For better security, set FRONTEND_URL or FRONTEND_URLS in .env
-    return [
-      'http://64.23.169.136',
-      'http://64.23.169.136:3000',
-      'http://64.23.169.136:80',
-      'https://roomio-weapp.vercel.app',
-    ];
+    return DEFAULT_PUBLIC_ORIGINS;
   }
-  
+
   // Development: Allow localhost on common ports and production frontend
-  return [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:3030',
-    'http://localhost:5173', // Vite default
-    'http://localhost:5174',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:3030',
-    'https://roomio-weapp.vercel.app',
-    'http://127.0.0.1:5173',
-    'http://64.23.169.136', // Production frontend
-    'http://64.23.169.136:3000', // Production frontend on port 3000
-    'http://64.23.169.136:80', // Production frontend on port 80
-  ];
+  return dedupeOrigins([
+    ...DEFAULT_DEV_ORIGINS,
+    ...DEFAULT_PUBLIC_ORIGINS,
+  ]);
 };
 
 const corsOptions = {
@@ -166,6 +185,14 @@ app.use('/api/hostels', hostelImagesRoutes);
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // Health check endpoint
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'LTS Portal API is running',
+    docs: '/api/health',
+  });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ 
     success: true, 
