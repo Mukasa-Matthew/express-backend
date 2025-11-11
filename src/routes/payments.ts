@@ -977,7 +977,13 @@ router.get('/summary/semesters', async (req, res) => {
         GROUP BY p.semester_id
       `;
 
-    const bookingTotalsCte = `
+    const publicBookingsExistsResult = await pool.query(
+      "SELECT to_regclass('public.public_hostel_bookings') AS table_ref",
+    );
+    const hasPublicBookingsTable = Boolean(publicBookingsExistsResult.rows[0]?.table_ref);
+
+    const bookingTotalsCte = hasPublicBookingsTable
+      ? `
       SELECT 
         semester_id,
         COALESCE(SUM(amount_paid),0)::numeric AS total_collected,
@@ -986,6 +992,14 @@ router.get('/summary/semesters', async (req, res) => {
       FROM public_hostel_bookings
       WHERE hostel_id = $1
       GROUP BY semester_id
+    `
+      : `
+      SELECT
+        NULL::INTEGER AS semester_id,
+        0::numeric AS total_collected,
+        0::numeric AS total_expected,
+        0::numeric AS total_outstanding
+      WHERE 1 = 0
     `;
 
     const expectedTotalsCte = `
@@ -1084,7 +1098,13 @@ router.get('/summary/global', async (req, res) => {
         GROUP BY u.hostel_id
       `;
 
-    const bookingTotalsCte = `
+    const publicBookingsExistsResult = await pool.query(
+      "SELECT to_regclass('public.public_hostel_bookings') AS table_ref",
+    );
+    const hasPublicBookingsTable = Boolean(publicBookingsExistsResult.rows[0]?.table_ref);
+
+    const bookingTotalsCte = hasPublicBookingsTable
+      ? `
       SELECT 
         hostel_id, 
         COALESCE(SUM(amount_paid),0)::numeric AS total_collected,
@@ -1093,6 +1113,14 @@ router.get('/summary/global', async (req, res) => {
       FROM public_hostel_bookings
       WHERE hostel_id IS NOT NULL
       GROUP BY hostel_id
+    `
+      : `
+      SELECT
+        NULL::INTEGER AS hostel_id,
+        0::numeric AS total_collected,
+        0::numeric AS total_expected,
+        0::numeric AS total_outstanding
+      WHERE 1 = 0
     `;
 
     const expectedTotalsCte = `
@@ -1126,7 +1154,8 @@ router.get('/summary/global', async (req, res) => {
         GROUP BY cs.hostel_id
       `;
 
-    const currentBookingTotalsCte = `
+    const currentBookingTotalsCte = hasPublicBookingsTable
+      ? `
       SELECT 
         cs.hostel_id, 
         COALESCE(SUM(b.amount_paid),0)::numeric AS total_collected,
@@ -1135,6 +1164,14 @@ router.get('/summary/global', async (req, res) => {
       FROM current_semesters cs
       JOIN public_hostel_bookings b ON b.semester_id = cs.semester_id AND b.hostel_id = cs.hostel_id
       GROUP BY cs.hostel_id
+    `
+      : `
+      SELECT
+        NULL::INTEGER AS hostel_id,
+        0::numeric AS total_collected,
+        0::numeric AS total_expected,
+        0::numeric AS total_outstanding
+      WHERE 1 = 0
     `;
 
     const currentExpectedTotalsCte = `
