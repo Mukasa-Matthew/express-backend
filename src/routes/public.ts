@@ -217,6 +217,16 @@ router.get('/universities-with-hostels', async (_req, res) => {
         ) pending_bookings ON TRUE
       `;
 
+    const universityImageColumnCheck = await pool.query(
+      `SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'universities'
+          AND column_name = 'image_url'
+        LIMIT 1`,
+    );
+    const universityImageSelect = universityImageColumnCheck.rowCount ? 'u.image_url' : 'NULL::text';
+
     const query = `
       WITH room_availability AS (
         SELECT
@@ -260,7 +270,7 @@ router.get('/universities-with-hostels', async (_req, res) => {
         u.contact_email,
         u.contact_phone,
         u.website,
-        u.image_url,
+        ${universityImageSelect} AS image_url,
         COALESCE(
           json_agg(
             json_build_object(
