@@ -19,6 +19,7 @@ interface PaymentTableInfo {
   purposeColumn: string | null;
   primaryDateColumn: string | null;
   createdAtColumn: string | null;
+  paymentMethodColumn: string | null;
 }
 
 let paymentTableInfoCache: PaymentTableInfo | null = null;
@@ -43,6 +44,11 @@ async function getPaymentTableInfo(): Promise<PaymentTableInfo> {
     : columns.includes('notes')
     ? 'notes'
     : null;
+  const paymentMethodColumn = columns.includes('payment_method')
+    ? 'payment_method'
+    : columns.includes('method')
+    ? 'method'
+    : null;
 
   const primaryDateColumn = columns.includes('payment_date')
     ? 'payment_date'
@@ -61,6 +67,7 @@ async function getPaymentTableInfo(): Promise<PaymentTableInfo> {
     purposeColumn,
     primaryDateColumn,
     createdAtColumn,
+    paymentMethodColumn,
   };
 
   return paymentTableInfoCache;
@@ -78,6 +85,61 @@ function buildPaymentDateExpression(info: PaymentTableInfo): string {
     return `p.${createdAtColumn}`;
   }
   return 'CURRENT_DATE';
+}
+
+const PAYMENT_METHOD_ALIASES: Record<string, string> = {
+  cash: 'cash',
+  'cash_payment': 'cash',
+  'cash payments': 'cash',
+  'cash-payment': 'cash',
+  'mobile_money': 'mobile_money',
+  'mobile-money': 'mobile_money',
+  'mobile money': 'mobile_money',
+  momo: 'mobile_money',
+  'mtn momo': 'mobile_money',
+  'airtel money': 'mobile_money',
+  'bank_transfer': 'bank_transfer',
+  'bank transfer': 'bank_transfer',
+  transfer: 'bank_transfer',
+  'bank': 'bank_transfer',
+  'cheque': 'bank_transfer',
+  'card': 'card',
+  'card_payment': 'card',
+  pos: 'card',
+  'point of sale': 'card',
+};
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Cash',
+  mobile_money: 'Mobile Money',
+  bank_transfer: 'Bank Transfer',
+  card: 'Card / POS',
+  unspecified: 'Unspecified',
+};
+
+function normalizePaymentMethod(method: string | null | undefined): string {
+  if (method == null) return 'unspecified';
+  const key = method.toString().trim().toLowerCase();
+  if (!key) return 'unspecified';
+  return (
+    PAYMENT_METHOD_ALIASES[key] ||
+    key
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') ||
+    'unspecified'
+  );
+}
+
+function getPaymentMethodLabel(method: string): string {
+  if (PAYMENT_METHOD_LABELS[method]) {
+    return PAYMENT_METHOD_LABELS[method];
+  }
+  const cleaned = method.replace(/_/g, ' ').trim();
+  return cleaned
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ') || 'Other';
 }
 
 interface StudentRoomAssignmentInfo {
@@ -496,7 +558,192 @@ router.get('/summary', async (req, res) => {
     }
     
     const totalPaidRes = await pool.query(totalPaidQuery, totalPaidParams);
-    const total_collected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
+    const ledgerCollected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
+
+    // Include booking payments recorded via the bookings module
+    const bookingPaymentParams = semesterId ? [hostelId, semesterId] : [hostelId];
+    const bookingPaymentsQuery = semesterId
+      ? `
+        SELECT 
+          COALESCE(SUM(pbp.amount), 0) AS total_collected,
+          COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+          COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+        FROM public_booking_payments pbp
+        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+        WHERE b.hostel_id = $1
+          AND b.semester_id = $2
+          AND pbp.status = 'completed'
+      `
+      : `
+        SELECT 
+          COALESCE(SUM(pbp.amount), 0) AS total_collected,
+          COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+          COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+        FROM public_booking_payments pbp
+        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+        WHERE b.hostel_id = $1
+          AND pbp.status = 'completed'
+      `;
+    const bookingPaymentsRes = await pool.query(bookingPaymentsQuery, bookingPaymentParams);
+    const bookingPaymentsTotal = parseFloat(bookingPaymentsRes.rows[0]?.total_collected || '0');
+    const bookingAmountPaidTotal = parseFloat(bookingPaymentsRes.rows[0]?.amount_paid || '0');
+    const bookingOutstandingFromPayments = parseFloat(bookingPaymentsRes.rows[0]?.outstanding || '0');
+
+    const bookingsAggregateQuery = semesterId
+      ? `
+        SELECT 
+          COALESCE(SUM(amount_paid), 0) AS amount_paid,
+          COALESCE(SUM(amount_due), 0) AS amount_due,
+          COALESCE(SUM(GREATEST(amount_due - amount_paid, 0)), 0) AS outstanding
+        FROM public_hostel_bookings
+        WHERE hostel_id = $1
+          AND semester_id = $2
+      `
+      : `
+        SELECT 
+          COALESCE(SUM(amount_paid), 0) AS amount_paid,
+          COALESCE(SUM(amount_due), 0) AS amount_due,
+          COALESCE(SUM(GREATEST(amount_due - amount_paid, 0)), 0) AS outstanding
+        FROM public_hostel_bookings
+        WHERE hostel_id = $1
+      `;
+    const bookingsAggregateRes = await pool.query(bookingsAggregateQuery, bookingPaymentParams);
+    const bookingsAmountPaid = parseFloat(bookingsAggregateRes.rows[0]?.amount_paid || '0');
+    const bookingsAmountDue = parseFloat(bookingsAggregateRes.rows[0]?.amount_due || '0');
+    const bookingsOutstandingTotal = parseFloat(bookingsAggregateRes.rows[0]?.outstanding || '0');
+
+    const total_collected = ledgerCollected + bookingsAmountPaid;
+
+    // Payment method breakdown (ledger + public bookings)
+    type RawMethodRow = { method: string | null; total: any };
+    let ledgerMethodTotals: RawMethodRow[] = [];
+    if (paymentInfo.paymentMethodColumn) {
+      const methodColumn = paymentInfo.paymentMethodColumn;
+      const ledgerMethodQuery = paymentInfo.hasHostelIdColumn
+        ? semesterId
+          ? `
+            SELECT LOWER(COALESCE(p.${methodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            WHERE p.hostel_id = $1
+              AND p.semester_id = $2
+            GROUP BY LOWER(COALESCE(p.${methodColumn}, 'unspecified'))
+          `
+          : `
+            SELECT LOWER(COALESCE(p.${methodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            WHERE p.hostel_id = $1
+            GROUP BY LOWER(COALESCE(p.${methodColumn}, 'unspecified'))
+          `
+        : semesterId
+        ? `
+          SELECT LOWER(COALESCE(p.${methodColumn}, 'unspecified')) AS method,
+                 COALESCE(SUM(p.amount), 0)::numeric AS total
+          FROM payments p
+          JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+          WHERE u.hostel_id = $1
+            AND p.semester_id = $2
+          GROUP BY LOWER(COALESCE(p.${methodColumn}, 'unspecified'))
+        `
+        : `
+          SELECT LOWER(COALESCE(p.${methodColumn}, 'unspecified')) AS method,
+                 COALESCE(SUM(p.amount), 0)::numeric AS total
+          FROM payments p
+          JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+          WHERE u.hostel_id = $1
+          GROUP BY LOWER(COALESCE(p.${methodColumn}, 'unspecified'))
+        `;
+      const ledgerMethodParams = paymentInfo.hasHostelIdColumn
+        ? semesterId
+          ? [hostelId, semesterId]
+          : [hostelId]
+        : semesterId
+        ? [hostelId, semesterId]
+        : [hostelId];
+      const ledgerMethodRes = await pool.query(ledgerMethodQuery, ledgerMethodParams);
+      ledgerMethodTotals = ledgerMethodRes.rows as RawMethodRow[];
+    }
+
+    const bookingMethodQuery = semesterId
+      ? `
+        SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
+               COALESCE(SUM(pbp.amount), 0)::numeric AS total
+        FROM public_booking_payments pbp
+        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+        WHERE b.hostel_id = $1
+          AND b.semester_id = $2
+          AND pbp.status = 'completed'
+        GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
+      `
+      : `
+        SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
+               COALESCE(SUM(pbp.amount), 0)::numeric AS total
+        FROM public_booking_payments pbp
+        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+        WHERE b.hostel_id = $1
+          AND pbp.status = 'completed'
+        GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
+      `;
+    const bookingMethodRes = await pool.query(bookingMethodQuery, bookingPaymentParams);
+    const bookingMethodTotals = bookingMethodRes.rows as RawMethodRow[];
+
+    type MethodAggregate = {
+      method: string;
+      ledger_total: number;
+      booking_total: number;
+    };
+    const methodTotalsMap = new Map<string, MethodAggregate>();
+    const addMethodAmount = (methodRaw: string | null, amount: number, source: 'ledger' | 'booking') => {
+      const method = normalizePaymentMethod(methodRaw);
+      const existing = methodTotalsMap.get(method) || {
+        method,
+        ledger_total: 0,
+        booking_total: 0,
+      };
+      if (source === 'ledger') {
+        existing.ledger_total += amount;
+      } else {
+        existing.booking_total += amount;
+      }
+      methodTotalsMap.set(method, existing);
+    };
+
+    ledgerMethodTotals.forEach((row) => {
+      const amount = Number.parseFloat((row.total ?? 0).toString());
+      if (Number.isFinite(amount) && amount !== 0) {
+        addMethodAmount(row.method, amount, 'ledger');
+      }
+    });
+    bookingMethodTotals.forEach((row) => {
+      const amount = Number.parseFloat((row.total ?? 0).toString());
+      if (Number.isFinite(amount) && amount !== 0) {
+        addMethodAmount(row.method, amount, 'booking');
+      }
+    });
+
+    const paymentMethodBreakdown = Array.from(methodTotalsMap.values())
+      .map((entry) => {
+        const total = entry.ledger_total + entry.booking_total;
+        return {
+          method: entry.method,
+          label: getPaymentMethodLabel(entry.method),
+          ledger_total: entry.ledger_total,
+          booking_total: entry.booking_total,
+          total,
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+
+    const ledgerMethodSum = paymentMethodBreakdown.reduce(
+      (sum, entry) => sum + entry.ledger_total,
+      0,
+    );
+    const bookingMethodSum = paymentMethodBreakdown.reduce(
+      (sum, entry) => sum + entry.booking_total,
+      0,
+    );
+    const paymentMethodCombinedTotal = ledgerMethodSum + bookingMethodSum;
 
     // Per-student expected vs paid (with optional semester filtering)
     const assignmentFilter = semesterId && sraInfo.hasSemesterColumn ? 'AND sra.semester_id = $2' : '';
@@ -575,7 +822,7 @@ router.get('/summary', async (req, res) => {
       queryParams
     );
 
-    const students = rowsRes.rows.map(r => ({
+    let students = rowsRes.rows.map(r => ({
       user_id: r.user_id,
       name: r.name,
       email: r.email,
@@ -589,9 +836,101 @@ router.get('/summary', async (req, res) => {
       status: r.expected === null ? 'unassigned' : (parseFloat(r.paid || 0) >= parseFloat(r.expected || 0) ? 'paid' : (parseFloat(r.paid || 0) > 0 ? 'partial' : 'unpaid'))
     }));
 
-    const total_outstanding = students.reduce((sum, s) => sum + (s.balance && s.balance > 0 ? s.balance : 0), 0);
+    let matchedBookingPaymentsTotal = 0;
+    if (bookingPaymentsTotal > 0) {
+      const bookingPaidByUserQuery = semesterId
+        ? `
+          SELECT u.id AS user_id, COALESCE(SUM(pbp.amount), 0)::numeric AS paid
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          JOIN users u ON u.hostel_id = b.hostel_id
+            AND b.student_email IS NOT NULL
+            AND LOWER(u.email) = LOWER(b.student_email)
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $2
+            AND pbp.status = 'completed'
+          GROUP BY u.id
+        `
+        : `
+          SELECT u.id AS user_id, COALESCE(SUM(pbp.amount), 0)::numeric AS paid
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          JOIN users u ON u.hostel_id = b.hostel_id
+            AND b.student_email IS NOT NULL
+            AND LOWER(u.email) = LOWER(b.student_email)
+          WHERE b.hostel_id = $1
+            AND pbp.status = 'completed'
+          GROUP BY u.id
+        `;
+      const bookingPaidByUserRes = await pool.query(
+        bookingPaidByUserQuery,
+        bookingPaymentParams,
+      );
+      const bookingPaidMap = new Map<number, number>();
+      bookingPaidByUserRes.rows.forEach((row: any) => {
+        const amount = parseFloat(row.paid || 0);
+        if (Number.isFinite(amount) && amount > 0) {
+          bookingPaidMap.set(row.user_id, amount);
+          matchedBookingPaymentsTotal += amount;
+        }
+      });
 
-    const payload = { total_collected, total_outstanding, students };
+      if (bookingPaidMap.size > 0) {
+        students = students.map((student) => {
+          const extra = bookingPaidMap.get(student.user_id) || 0;
+          if (!extra) return student;
+          const basePaid = Number(student.paid ?? 0);
+          const updatedPaid = basePaid + extra;
+          const expected = student.expected ?? null;
+          const recalculatedBalance =
+            expected !== null ? Math.max(expected - updatedPaid, 0) : student.balance;
+          let status = student.status;
+          if (expected !== null) {
+            if (updatedPaid >= expected) status = 'paid';
+            else if (updatedPaid > 0) status = 'partial';
+            else status = 'unpaid';
+          }
+          return {
+            ...student,
+            paid: updatedPaid,
+            balance: recalculatedBalance,
+            status,
+          };
+        });
+      }
+    }
+
+    const outstandingFromAssignments = students.reduce(
+      (sum, s) => sum + (s.balance && s.balance > 0 ? s.balance : 0),
+      0,
+    );
+    const total_outstanding = bookingsOutstandingTotal || outstandingFromAssignments;
+    const unlinkedBookingPayments = Math.max(
+      0,
+      bookingPaymentsTotal - matchedBookingPaymentsTotal,
+    );
+
+    const payload = {
+      total_collected,
+      total_outstanding,
+      students,
+      booking_payments_total: bookingPaymentsTotal,
+      bookings_amount_paid: bookingsAmountPaid,
+      bookings_amount_due: bookingsAmountDue,
+      bookings_outstanding_total: bookingsOutstandingTotal,
+      unlinked_booking_payments: unlinkedBookingPayments,
+      payment_methods: {
+        items: paymentMethodBreakdown,
+        ledger_total: ledgerMethodSum,
+        booking_total: bookingMethodSum,
+        combined_total: paymentMethodCombinedTotal,
+        notes: {
+          ledger_reported_total: ledgerCollected,
+          booking_payments_reported_total: bookingPaymentsTotal,
+          bookings_amount_paid_total: bookingsAmountPaid,
+        },
+      },
+    };
     summaryCache.set(hostelId, { data: payload, expiresAt: now + SUMMARY_TTL_MS });
     res.json({ success: true, data: payload });
   } catch (e) {
@@ -638,6 +977,17 @@ router.get('/summary/semesters', async (req, res) => {
         GROUP BY p.semester_id
       `;
 
+    const bookingTotalsCte = `
+      SELECT 
+        semester_id,
+        COALESCE(SUM(amount_paid),0)::numeric AS total_collected,
+        COALESCE(SUM(amount_due),0)::numeric AS total_expected,
+        COALESCE(SUM(GREATEST(amount_due - amount_paid, 0)),0)::numeric AS total_outstanding
+      FROM public_hostel_bookings
+      WHERE hostel_id = $1
+      GROUP BY semester_id
+    `;
+
     const expectedTotalsCte = `
       SELECT sra.semester_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM student_room_assignments sra
@@ -652,6 +1002,9 @@ router.get('/summary/semesters', async (req, res) => {
         WITH payment_totals AS (
           ${paymentTotalsCte}
         ),
+        booking_totals AS (
+          ${bookingTotalsCte}
+        ),
         expected_totals AS (
           ${expectedTotalsCte}
         )
@@ -661,11 +1014,13 @@ router.get('/summary/semesters', async (req, res) => {
                se.start_date,
                se.end_date,
                se.is_current,
-               COALESCE(pt.total_collected,0)::numeric AS total_collected,
-               COALESCE(et.total_expected,0)::numeric AS total_expected,
-               (COALESCE(et.total_expected,0)::numeric - COALESCE(pt.total_collected,0)::numeric) AS outstanding
+               (COALESCE(pt.total_collected,0)::numeric + COALESCE(bt.total_collected,0)::numeric) AS total_collected,
+               (COALESCE(et.total_expected,0)::numeric + COALESCE(bt.total_expected,0)::numeric) AS total_expected,
+               (COALESCE(et.total_expected,0)::numeric + COALESCE(bt.total_expected,0)::numeric - (COALESCE(pt.total_collected,0)::numeric + COALESCE(bt.total_collected,0)::numeric)) AS outstanding,
+               COALESCE(bt.total_outstanding,0)::numeric AS booking_outstanding
         FROM semesters se
         LEFT JOIN payment_totals pt ON pt.semester_id = se.id
+        LEFT JOIN booking_totals bt ON bt.semester_id = se.id
         LEFT JOIN expected_totals et ON et.semester_id = se.id
         WHERE se.hostel_id = $1
         ORDER BY se.start_date DESC, se.id DESC
@@ -683,6 +1038,7 @@ router.get('/summary/semesters', async (req, res) => {
       total_collected: parseFloat(row.total_collected || 0),
       total_expected: parseFloat(row.total_expected || 0),
       outstanding: parseFloat(row.outstanding || 0),
+      booking_outstanding: parseFloat(row.booking_outstanding || 0),
     }));
 
     const current = semesters.find((s) => s.is_current) || null;
@@ -728,6 +1084,17 @@ router.get('/summary/global', async (req, res) => {
         GROUP BY u.hostel_id
       `;
 
+    const bookingTotalsCte = `
+      SELECT 
+        hostel_id, 
+        COALESCE(SUM(amount_paid),0)::numeric AS total_collected,
+        COALESCE(SUM(amount_due),0)::numeric AS total_expected,
+        COALESCE(SUM(GREATEST(amount_due - amount_paid, 0)),0)::numeric AS total_outstanding
+      FROM public_hostel_bookings
+      WHERE hostel_id IS NOT NULL
+      GROUP BY hostel_id
+    `;
+
     const expectedTotalsCte = `
       SELECT rm.hostel_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM student_room_assignments sra
@@ -759,6 +1126,17 @@ router.get('/summary/global', async (req, res) => {
         GROUP BY cs.hostel_id
       `;
 
+    const currentBookingTotalsCte = `
+      SELECT 
+        cs.hostel_id, 
+        COALESCE(SUM(b.amount_paid),0)::numeric AS total_collected,
+        COALESCE(SUM(b.amount_due),0)::numeric AS total_expected,
+        COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)),0)::numeric AS total_outstanding
+      FROM current_semesters cs
+      JOIN public_hostel_bookings b ON b.semester_id = cs.semester_id AND b.hostel_id = cs.hostel_id
+      GROUP BY cs.hostel_id
+    `;
+
     const currentExpectedTotalsCte = `
       SELECT cs.hostel_id, COALESCE(SUM(${roomPriceForSum}),0) AS total_expected
       FROM current_semesters cs
@@ -783,24 +1161,34 @@ router.get('/summary/global', async (req, res) => {
       ),
       current_expected_totals AS (
         ${currentExpectedTotalsCte}
+      ),
+      booking_totals AS (
+        ${bookingTotalsCte}
+      ),
+      current_booking_totals AS (
+        ${currentBookingTotalsCte}
       )
       SELECT h.id,
              h.name,
-             COALESCE(pt.total_collected,0)::numeric AS total_collected,
-             COALESCE(et.total_expected,0)::numeric AS total_expected,
-             (COALESCE(et.total_expected,0)::numeric - COALESCE(pt.total_collected,0)::numeric) AS outstanding,
+             (COALESCE(pt.total_collected,0)::numeric + COALESCE(bt.total_collected,0)::numeric) AS total_collected,
+             (COALESCE(et.total_expected,0)::numeric + COALESCE(bt.total_expected,0)::numeric) AS total_expected,
+             (COALESCE(et.total_expected,0)::numeric + COALESCE(bt.total_expected,0)::numeric - (COALESCE(pt.total_collected,0)::numeric + COALESCE(bt.total_collected,0)::numeric)) AS outstanding,
+             COALESCE(bt.total_outstanding,0)::numeric AS booking_outstanding,
              cs.semester_id AS current_semester_id,
              cs.name AS current_semester_name,
              cs.academic_year AS current_semester_academic_year,
-             COALESCE(cpt.total_collected,0)::numeric AS current_total_collected,
-             COALESCE(cet.total_expected,0)::numeric AS current_total_expected,
-             (COALESCE(cet.total_expected,0)::numeric - COALESCE(cpt.total_collected,0)::numeric) AS current_outstanding
+             (COALESCE(cpt.total_collected,0)::numeric + COALESCE(cbt.total_collected,0)::numeric) AS current_total_collected,
+             (COALESCE(cet.total_expected,0)::numeric + COALESCE(cbt.total_expected,0)::numeric) AS current_total_expected,
+             (COALESCE(cet.total_expected,0)::numeric + COALESCE(cbt.total_expected,0)::numeric - (COALESCE(cpt.total_collected,0)::numeric + COALESCE(cbt.total_collected,0)::numeric)) AS current_outstanding,
+             COALESCE(cbt.total_outstanding,0)::numeric AS current_booking_outstanding
       FROM hostels h
       LEFT JOIN payment_totals pt ON pt.hostel_id = h.id
+      LEFT JOIN booking_totals bt ON bt.hostel_id = h.id
       LEFT JOIN expected_totals et ON et.hostel_id = h.id
       LEFT JOIN current_semesters cs ON cs.hostel_id = h.id
       LEFT JOIN current_payment_totals cpt ON cpt.hostel_id = h.id
       LEFT JOIN current_expected_totals cet ON cet.hostel_id = h.id
+      LEFT JOIN current_booking_totals cbt ON cbt.hostel_id = h.id
       ORDER BY h.name ASC
     `);
 
@@ -811,6 +1199,8 @@ router.get('/summary/global', async (req, res) => {
       const currentCollected = parseFloat(row.current_total_collected || 0);
       const currentExpected = parseFloat(row.current_total_expected || 0);
       const currentOutstanding = parseFloat(row.current_outstanding || 0);
+      const bookingOutstanding = parseFloat(row.booking_outstanding || 0);
+      const currentBookingOutstanding = parseFloat(row.current_booking_outstanding || 0);
 
       return {
         hostel_id: row.id,
@@ -819,6 +1209,7 @@ router.get('/summary/global', async (req, res) => {
           collected: totalCollected,
           expected: totalExpected,
           outstanding,
+          booking_outstanding: bookingOutstanding,
         },
         current_semester: row.current_semester_id
           ? {
@@ -828,6 +1219,7 @@ router.get('/summary/global', async (req, res) => {
               collected: currentCollected,
               expected: currentExpected,
               outstanding: currentOutstanding,
+              booking_outstanding: currentBookingOutstanding,
             }
           : null,
       };

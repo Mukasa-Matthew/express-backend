@@ -5,7 +5,10 @@ import { requireActiveSemester } from '../utils/semesterMiddleware';
 
 const router = express.Router();
 
-async function getHostelId(userId: number, role: string): Promise<number | null> {
+async function getHostelId(userId: number, role: string, explicitHostelId?: number | null): Promise<number | null> {
+  if (role === 'super_admin') {
+    return explicitHostelId ?? null;
+  }
   if (role === 'hostel_admin') {
     const u = await UserModel.findById(userId);
     return u?.hostel_id || null;
@@ -29,9 +32,14 @@ router.get('/', async (req, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
-    const hostelId = await getHostelId(currentUser.id, currentUser.role);
-    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian' && currentUser.role !== 'super_admin')) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const requestedHostelId = req.query.hostel_id ? Number(req.query.hostel_id) : null;
+    const hostelId = await getHostelId(currentUser.id, currentUser.role, requestedHostelId);
+    if (!hostelId) {
+      return res.status(400).json({ success: false, message: 'Hostel context required to view expenses' });
+    }
     const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
     const limitRaw = Math.max(1, parseInt((req.query.limit as string) || '20', 10));
     const limit = Math.min(100, limitRaw);
@@ -89,9 +97,12 @@ router.get('/summary', async (req, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
-    const hostelId = await getHostelId(currentUser.id, currentUser.role);
-    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian' && currentUser.role !== 'super_admin')) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+    const requestedHostelId = req.query.hostel_id ? Number(req.query.hostel_id) : null;
+    const hostelId = await getHostelId(currentUser.id, currentUser.role, requestedHostelId);
+    if (!hostelId) return res.status(400).json({ success: false, message: 'Hostel context required to view expense summary' });
 
     const columnsRes = await pool.query(`
       SELECT column_name 
@@ -164,10 +175,8 @@ router.get('/summary/hostel', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
-    let hostelId = await getHostelId(currentUser.id, currentUser.role);
-    if (currentUser.role === 'super_admin' && req.query.hostel_id) {
-      hostelId = Number(req.query.hostel_id) || null;
-    }
+    const requestedHostelId = req.query.hostel_id ? Number(req.query.hostel_id) : null;
+    const hostelId = await getHostelId(currentUser.id, currentUser.role, requestedHostelId);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Hostel scope required' });
 
     const monthsParam = Number(req.query.months);

@@ -4,7 +4,18 @@ import { UserModel } from '../models/User';
 
 const router = express.Router();
 
-async function resolveHostelIdForUser(userId: number, role: string): Promise<number | null> {
+async function resolveHostelIdForUser(
+  userId: number,
+  role: string,
+  explicitHostelId?: number | null,
+): Promise<number | null> {
+  if (role === 'super_admin') {
+    if (explicitHostelId) {
+      return explicitHostelId;
+    }
+    return null;
+  }
+
   if (role === 'hostel_admin') {
     const u = await UserModel.findById(userId);
     return u?.hostel_id || null;
@@ -32,11 +43,17 @@ router.get('/', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid token' });
     }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian' && currentUser.role !== 'super_admin')
+    ) {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
-    const hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role);
-    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
+    const requestedHostelId = req.query.hostel_id ? parseInt(String(req.query.hostel_id), 10) : null;
+    const hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role, requestedHostelId);
+    if (!hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
     const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
     const limitRaw = Math.max(1, parseInt((req.query.limit as string) || '20', 10));
     const limit = Math.min(100, limitRaw);
@@ -66,27 +83,65 @@ router.get('/available', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid token' });
     }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian' && currentUser.role !== 'super_admin')
+    ) {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
-    const hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role);
-    if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
-    
-    // Get rooms that have available space based on capacity
-    const result = await pool.query(`
-      SELECT 
-        r.*,
-        COALESCE(COUNT(sra.id), 0) as current_occupants,
-        r.capacity,
-        (r.capacity - COALESCE(COUNT(sra.id), 0)) as available_spaces
-      FROM rooms r
-      LEFT JOIN student_room_assignments sra ON r.id = sra.room_id AND sra.status = 'active'
-      WHERE r.hostel_id = $1 AND r.status = 'available'
-      GROUP BY r.id
-      HAVING (r.capacity - COALESCE(COUNT(sra.id), 0)) > 0
-      ORDER BY r.room_number
-    `, [hostelId]);
-    
+    const requestedHostelId = req.query.hostel_id ? parseInt(String(req.query.hostel_id), 10) : null;
+    const hostelId = await resolveHostelIdForUser(currentUser.id, currentUser.role, requestedHostelId);
+    if (!hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const semesterIdRaw = req.query.semester_id ? parseInt(String(req.query.semester_id), 10) : null;
+    const semesterId = Number.isInteger(semesterIdRaw) ? semesterIdRaw : null;
+
+    const params: any[] = [hostelId];
+    let nextIndex = 2;
+
+    let bookingsSemesterFilter = '';
+    let assignmentsSemesterFilter = '';
+
+    if (semesterId) {
+      params.push(semesterId);
+      bookingsSemesterFilter = `AND pb.semester_id = $${nextIndex}`;
+      assignmentsSemesterFilter = `AND (sra.semester_id = $${nextIndex} OR sra.semester_id IS NULL)`;
+      nextIndex += 1;
+    }
+
+    const result = await pool.query(
+      `
+        SELECT 
+          r.*,
+          COALESCE(active_assignments.active_count, 0) AS current_occupants,
+          COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
+          r.capacity,
+          (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) AS available_spaces
+        FROM rooms r
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS active_count
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id
+            AND sra.status = 'active'
+            ${assignmentsSemesterFilter}
+        ) active_assignments ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS booking_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            ${bookingsSemesterFilter}
+        ) pending_bookings ON true
+        WHERE r.hostel_id = $1
+          AND r.status = 'available'
+          AND (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) > 0
+        ORDER BY r.room_number
+      `,
+      params,
+    );
+
     res.json({ success: true, data: result.rows });
   } catch (e) {
     console.error('List available rooms error:', e);

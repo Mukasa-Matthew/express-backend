@@ -172,6 +172,17 @@ export class HostelSubscriptionModel {
     return subscriptions.map(prismaSubscriptionToSubscription);
   }
 
+  static async findById(id: number): Promise<(HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number }) | null> {
+    const subscription = await prisma.hostelSubscription.findUnique({
+      where: { id },
+      include: {
+        plan: true,
+      },
+    });
+
+    return subscription ? prismaSubscriptionToSubscription(subscription) : null;
+  }
+
   static async findActiveByHostelId(hostelId: number): Promise<(HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number }) | null> {
     const subscription = await prisma.hostelSubscription.findFirst({
       where: {
@@ -197,6 +208,26 @@ export class HostelSubscriptionModel {
       return true;
     } catch (error: any) {
       if (error.code === 'P2025') return false;
+      throw error;
+    }
+  }
+
+  static async extendEndDate(id: number, newEndDate: Date): Promise<(HostelSubscription & { plan_name?: string; duration_months?: number; total_price?: number }) | null> {
+    try {
+      const updated = await prisma.hostelSubscription.update({
+        where: { id },
+        data: {
+          endDate: newEndDate,
+          status: 'active',
+        },
+        include: {
+          plan: true,
+        },
+      });
+
+      return prismaSubscriptionToSubscription(updated);
+    } catch (error: any) {
+      if (error.code === 'P2025') return null;
       throw error;
     }
   }

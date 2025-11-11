@@ -80,6 +80,62 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Semester-level enrollment summary for current hostel
+router.get('/summary/semesters', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
+    }
+
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch (err) {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
+    if (!hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const summaryQuery = `
+      SELECT 
+        s.id,
+        s.name,
+        s.academic_year,
+        s.start_date,
+        s.end_date,
+        s.status,
+        COUNT(DISTINCT CASE WHEN se.enrollment_status = 'active' THEN se.user_id END) AS active_students,
+        COUNT(DISTINCT se.user_id) AS total_students
+      FROM semesters s
+      LEFT JOIN semester_enrollments se 
+        ON se.semester_id = s.id
+      WHERE s.hostel_id = $1
+      GROUP BY s.id
+      ORDER BY s.start_date DESC NULLS LAST, s.id DESC
+    `;
+
+    const result = await pool.query(summaryQuery, [hostelId]);
+
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error('Semester summary error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load semester summary' });
+  }
+});
+
 // Create student for current hostel
 router.post('/', async (req: Request, res) => {
   const client = await pool.connect();

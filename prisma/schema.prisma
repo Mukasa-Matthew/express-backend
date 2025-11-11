@@ -33,6 +33,7 @@ model University {
   contactPhone String?  @map("contact_phone") @db.VarChar(20)
   contactEmail String?  @map("contact_email") @db.VarChar(100)
   website      String?  @db.VarChar(200)
+  imageUrl     String?  @map("image_url") @db.Text
   status       String   @default("active") @db.VarChar(20)
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
@@ -381,32 +382,73 @@ model HostelImage {
 }
 
 model PublicHostelBooking {
-  id               Int       @id @default(autoincrement())
-  hostelId         Int       @map("hostel_id")
-  universityId     Int?      @map("university_id")
-  studentName      String    @map("student_name") @db.VarChar(255)
-  studentEmail     String?   @map("student_email") @db.VarChar(255)
-  studentPhone     String    @map("student_phone") @db.VarChar(30)
-  gender           String?   @db.VarChar(20)
-  course           String?   @db.VarChar(100)
-  preferredCheckIn DateTime? @map("preferred_check_in")
-  stayDuration     String?   @map("stay_duration") @db.VarChar(100)
-  notes            String?   @db.Text
-  bookingFee       Int       @map("booking_fee")
-  paymentPhone     String?   @map("payment_phone") @db.VarChar(30)
-  paymentReference String?   @map("payment_reference") @db.VarChar(100)
-  paymentStatus    String    @default("pending") @map("payment_status") @db.VarChar(50)
-  status           String    @default("pending") @db.VarChar(50)
-  confirmedAt      DateTime? @map("confirmed_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
-  updatedAt        DateTime  @updatedAt @map("updated_at")
+  id                   Int       @id @default(autoincrement())
+  hostelId             Int       @map("hostel_id")
+  universityId         Int?      @map("university_id")
+  semesterId           Int?      @map("semester_id")
+  roomId               Int?      @map("room_id")
+  source               String    @default("online") @db.VarChar(30)
+  createdByUserId      Int?      @map("created_by_user_id")
+  studentName          String    @map("student_name") @db.VarChar(255)
+  studentEmail         String?   @map("student_email") @db.VarChar(255)
+  studentPhone         String    @map("student_phone") @db.VarChar(30)
+  whatsapp             String?   @db.VarChar(30)
+  gender               String?   @db.VarChar(20)
+  dateOfBirth          DateTime? @map("date_of_birth") @db.Date
+  registrationNumber   String?   @map("registration_number") @db.VarChar(100)
+  course               String?   @db.VarChar(100)
+  preferredCheckIn     DateTime? @map("preferred_check_in")
+  stayDuration         String?   @map("stay_duration") @db.VarChar(100)
+  emergencyContact     String?   @map("emergency_contact") @db.VarChar(100)
+  notes                String?   @db.Text
+  currency             String    @default("UGX") @db.VarChar(10)
+  bookingFee           Decimal   @map("booking_fee") @db.Decimal(10, 2)
+  amountDue            Decimal   @default(0) @map("amount_due") @db.Decimal(10, 2)
+  amountPaid           Decimal   @default(0) @map("amount_paid") @db.Decimal(10, 2)
+  paymentPhone         String?   @map("payment_phone") @db.VarChar(30)
+  paymentReference     String?   @map("payment_reference") @db.VarChar(100)
+  paymentStatus        String    @default("pending") @map("payment_status") @db.VarChar(50)
+  status               String    @default("pending") @db.VarChar(50)
+  verificationCode     String?   @map("verification_code") @db.VarChar(50)
+  verificationIssuedAt DateTime? @map("verification_issued_at")
+  confirmedAt          DateTime? @map("confirmed_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  hostel      Hostel     @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  hostel      Hostel      @relation(fields: [hostelId], references: [id], onDelete: Cascade)
   university  University? @relation(fields: [universityId], references: [id])
+  semester    Semester?   @relation(fields: [semesterId], references: [id])
+  room        Room?       @relation(fields: [roomId], references: [id])
+  createdBy   User?       @relation(fields: [createdByUserId], references: [id])
+  payments    PublicBookingPayment[]
 
   @@index([hostelId], map: "idx_public_bookings_hostel_id")
   @@index([universityId], map: "idx_public_bookings_university_id")
+  @@index([semesterId], map: "idx_public_bookings_semester_id")
+  @@index([status], map: "idx_public_bookings_status")
+  @@index([verificationCode], map: "idx_public_bookings_verification_code")
   @@map("public_hostel_bookings")
+}
+
+model PublicBookingPayment {
+  id               Int       @id @default(autoincrement())
+  bookingId        Int       @map("booking_id")
+  amount           Decimal   @db.Decimal(10, 2)
+  method           String    @db.VarChar(30)
+  status           String    @default("completed") @db.VarChar(30)
+  reference        String?   @db.VarChar(100)
+  notes            String?   @db.Text
+  recordedByUserId Int?      @map("recorded_by_user_id")
+  recordedAt       DateTime  @default(now()) @map("recorded_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  booking    PublicHostelBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  recordedBy User?               @relation(fields: [recordedByUserId], references: [id])
+
+  @@index([bookingId], map: "idx_public_booking_payments_booking_id")
+  @@index([method], map: "idx_public_booking_payments_method")
+  @@map("public_booking_payments")
 }
 
 // Audit Logs table

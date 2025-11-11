@@ -127,9 +127,26 @@ router.post('/login', async (req, res) => {
       hostelId = custodianResult.rows[0]?.hostel_id || null;
     }
 
-    // Enforce subscription status for hostel_admin and custodian
     let subscriptionWarningDays: number | null = null;
+
     if ((user.role === 'hostel_admin' || user.role === 'custodian') && hostelId) {
+      const hostelStatusRes = await pool.query('SELECT status FROM hostels WHERE id = $1', [hostelId]);
+      const hostelStatus = hostelStatusRes.rows[0]?.status || null;
+      if (!hostelStatus) {
+        return res.status(403).json({
+          success: false,
+          message: 'Hostel record not found. Please contact the Super Admin.',
+          code: 'HOSTEL_NOT_FOUND',
+        });
+      }
+      if (hostelStatus !== 'active') {
+        return res.status(403).json({
+          success: false,
+          message: 'This hostel account is currently disabled. Please contact the Super Admin for assistance.',
+          code: 'HOSTEL_INACTIVE',
+        });
+      }
+
       // Fetch current or latest subscription for the user's hostel
       const subResult = await pool.query(
         `SELECT hs.id, hs.status, hs.end_date

@@ -22,6 +22,7 @@ import subscriptionPlansRoutes from './routes/subscription-plans';
 import semestersRoutes from './routes/semesters';
 import publicRoutes from './routes/public';
 import hostelImagesRoutes from './routes/hostel-images';
+import bookingsRoutes from './routes/bookings';
 import { SubscriptionNotificationService } from './services/subscriptionNotificationService';
 import { SemesterService } from './services/semesterService';
 import { EmailService } from './services/emailService';
@@ -181,6 +182,7 @@ app.use('/api/inventory', writeLimiter, inventoryRoutes);
 app.use('/api/expenses', writeLimiter, expensesRoutes);
 app.use('/api/subscription-plans', writeLimiter, subscriptionPlansRoutes);
 app.use('/api/semesters', writeLimiter, semestersRoutes);
+app.use('/api/bookings', writeLimiter, bookingsRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/hostels', hostelImagesRoutes);
 

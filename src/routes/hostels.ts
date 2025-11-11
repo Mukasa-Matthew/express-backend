@@ -1,5 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
+import type { PoolClient } from 'pg';
 import { HostelModel, CreateHostelWithAdminData } from '../models/Hostel';
 import { UserModel } from '../models/User';
 import { HostelSubscriptionModel } from '../models/SubscriptionPlan';
@@ -11,6 +12,59 @@ import jwt from 'jsonwebtoken';
 
 const router = express.Router();
 const resendLimiter = new SimpleRateLimiter(3, 60 * 60 * 1000); // 3 per hour
+
+async function nullifyUserForeignKeys(client: PoolClient, userId: number) {
+  const safeExecutions: Array<{ sql: string; label: string }> = [
+    { sql: 'UPDATE expenses SET paid_by = NULL WHERE paid_by = $1', label: 'expenses.paid_by' },
+    { sql: 'UPDATE student_room_assignments SET assigned_by = NULL WHERE assigned_by = $1', label: 'student_room_assignments.assigned_by' },
+    { sql: 'UPDATE payments SET recorded_by = NULL WHERE recorded_by = $1', label: 'payments.recorded_by' },
+    { sql: 'UPDATE audit_logs SET user_id = NULL WHERE user_id = $1', label: 'audit_logs.user_id' },
+  ];
+
+  for (const statement of safeExecutions) {
+    try {
+      await client.query(statement.sql, [userId]);
+    } catch (error) {
+      console.warn(`[Hostels] Skipping nullable update for ${statement.label}:`, error);
+    }
+  }
+
+  try {
+    const columnResult = await client.query(
+      `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'public_hostel_bookings'
+      `,
+    );
+    const bookingColumns = new Set(columnResult.rows.map((row) => row.column_name));
+    const publicBookingUpdates: Array<{ sql: string; label: string }> = [];
+
+    if (bookingColumns.has('created_by_user_id')) {
+      publicBookingUpdates.push({
+        sql: 'UPDATE public_hostel_bookings SET created_by_user_id = NULL WHERE created_by_user_id = $1',
+        label: 'public_hostel_bookings.created_by_user_id',
+      });
+    }
+    if (bookingColumns.has('confirmed_by_user_id')) {
+      publicBookingUpdates.push({
+        sql: 'UPDATE public_hostel_bookings SET confirmed_by_user_id = NULL WHERE confirmed_by_user_id = $1',
+        label: 'public_hostel_bookings.confirmed_by_user_id',
+      });
+    }
+
+    for (const statement of publicBookingUpdates) {
+      try {
+        await client.query(statement.sql, [userId]);
+      } catch (error) {
+        console.warn(`[Hostels] Skipping nullable update for ${statement.label}:`, error);
+      }
+    }
+  } catch (columnError) {
+    console.warn('[Hostels] Unable to inspect public_hostel_bookings columns:', columnError);
+  }
+}
 
 // Helper function to verify token (handles local super admin bypass)
 export async function verifyTokenAndGetUser(req: express.Request): Promise<{ user: any; userId: number; role: string } | null> {
@@ -654,6 +708,75 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// Update hostel status (super_admin only)
+router.patch('/:id/status', async (req, res) => {
+  try {
+    const hostelId = parseInt(req.params.id, 10);
+    if (Number.isNaN(hostelId)) {
+      return res.status(400).json({ success: false, message: 'Invalid hostel id' });
+    }
+
+    const authResult = await verifyTokenAndGetUser(req);
+    if (!authResult || authResult.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only super admins can change hostel status' });
+    }
+
+    const { status } = req.body as { status?: string };
+    const allowedStatuses = new Set(['active', 'inactive', 'suspended', 'maintenance']);
+    if (!status || !allowedStatuses.has(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Allowed values: ${Array.from(allowedStatuses).join(', ')}`,
+      });
+    }
+
+    const updateResult = await pool.query(
+      `UPDATE hostels
+       SET status = $1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, name, status`,
+      [status, hostelId],
+    );
+
+    if (updateResult.rowCount === 0) {
+      return res.status(404).json({ success: false, message: 'Hostel not found' });
+    }
+
+    // Mirror status to custodians for clarity (best effort)
+    try {
+      if (status === 'active') {
+        await pool.query(
+          `UPDATE custodians
+           SET status = 'active',
+               updated_at = NOW()
+           WHERE hostel_id = $1`,
+          [hostelId],
+        );
+      } else {
+        await pool.query(
+          `UPDATE custodians
+           SET status = 'inactive',
+               updated_at = NOW()
+           WHERE hostel_id = $1`,
+          [hostelId],
+        );
+      }
+    } catch (mirrorError) {
+      console.warn('[Hostels] Failed to sync custodian status:', mirrorError);
+    }
+
+    return res.json({
+      success: true,
+      message: `Hostel ${status === 'active' ? 'activated' : 'status updated'} successfully`,
+      data: updateResult.rows[0],
+    });
+  } catch (error) {
+    console.error('Update hostel status error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // Delete hostel (super_admin only)
 router.delete('/:id', async (req, res) => {
   const client = await pool.connect();
@@ -682,24 +805,26 @@ router.delete('/:id', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Get all custodians for this hostel
+    // Collect all user IDs tied to this hostel (custodians + hostel admins)
     const custodiansResult = await client.query(
       'SELECT user_id FROM custodians WHERE hostel_id = $1',
       [id]
     );
-
-    // Delete custodian users (custodians table will be deleted via CASCADE when hostel is deleted)
-    for (const row of custodiansResult.rows) {
-      await client.query('DELETE FROM users WHERE id = $1', [row.user_id]);
-    }
-
-    // Delete hostel admin user (users with hostel_id and role = 'hostel_admin')
     const adminResult = await client.query(
       "SELECT id FROM users WHERE hostel_id = $1 AND role = 'hostel_admin'",
       [id]
     );
-    for (const row of adminResult.rows) {
-      await client.query('DELETE FROM users WHERE id = $1', [row.id]);
+
+    const userIdsToDelete = Array.from(
+      new Set<number>([
+        ...custodiansResult.rows.map((row) => Number(row.user_id)),
+        ...adminResult.rows.map((row) => Number(row.id)),
+      ]),
+    );
+
+    for (const userId of userIdsToDelete) {
+      await nullifyUserForeignKeys(client, userId);
+      await client.query('DELETE FROM users WHERE id = $1', [userId]);
     }
 
     // Delete the hostel (this will CASCADE delete custodians, rooms, subscriptions, etc.)
@@ -900,6 +1025,85 @@ router.post('/:id/resend-credentials', async (req, res) => {
       success: false,
       message: 'Internal server error'
     });
+  }
+});
+
+// Extend hostel subscription (super_admin only)
+router.post('/:id/subscription/extend', async (req, res) => {
+  try {
+    const hostelId = parseInt(req.params.id, 10);
+    if (Number.isNaN(hostelId)) {
+      return res.status(400).json({ success: false, message: 'Invalid hostel id' });
+    }
+
+    const authResult = await verifyTokenAndGetUser(req);
+    if (!authResult || authResult.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden: Only super admins can extend subscriptions' });
+    }
+
+    const hostel = await HostelModel.findById(hostelId);
+    if (!hostel) {
+      return res.status(404).json({ success: false, message: 'Hostel not found' });
+    }
+
+    if (!hostel.current_subscription_id) {
+      return res.status(400).json({ success: false, message: 'Hostel has no active subscription to extend' });
+    }
+
+    const subscription = await HostelSubscriptionModel.findById(hostel.current_subscription_id);
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Current subscription not found' });
+    }
+
+    const { new_end_date, additional_days, additional_months } = req.body as {
+      new_end_date?: string;
+      additional_days?: number;
+      additional_months?: number;
+    };
+
+    let targetEndDate: Date | null = null;
+
+    if (typeof new_end_date === 'string' && new_end_date.trim()) {
+      const parsed = new Date(new_end_date);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid new_end_date. Use YYYY-MM-DD format.' });
+      }
+      targetEndDate = parsed;
+    } else if (typeof additional_days === 'number' && Number.isFinite(additional_days) && additional_days > 0) {
+      targetEndDate = new Date(subscription.end_date);
+      targetEndDate.setDate(targetEndDate.getDate() + Math.floor(additional_days));
+    } else if (typeof additional_months === 'number' && Number.isFinite(additional_months) && additional_months > 0) {
+      targetEndDate = new Date(subscription.end_date);
+      targetEndDate.setMonth(targetEndDate.getMonth() + Math.floor(additional_months));
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide new_end_date (YYYY-MM-DD) or a positive additional_days / additional_months value.',
+      });
+    }
+
+    if (!targetEndDate || Number.isNaN(targetEndDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Computed end date is invalid' });
+    }
+
+    const currentEndDate = new Date(subscription.end_date);
+    if (targetEndDate <= currentEndDate) {
+      return res.status(400).json({ success: false, message: 'New end date must be later than the current end date' });
+    }
+
+    const updatedSubscription = await HostelSubscriptionModel.extendEndDate(subscription.id, targetEndDate);
+    if (!updatedSubscription) {
+      return res.status(500).json({ success: false, message: 'Failed to extend subscription' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Hostel subscription extended successfully',
+      data: updatedSubscription,
+    });
+  } catch (error) {
+    console.error('Extend subscription error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 

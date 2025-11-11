@@ -168,6 +168,44 @@ export class EmailService {
 
       // If no provider is configured, fall back to console logging
       if (this.provider === 'none') {
+        const isLocalEnv =
+          process.env.NODE_ENV === 'development' ||
+          process.env.NODE_ENV === 'dev' ||
+          !process.env.NODE_ENV ||
+          process.env.IS_LOCAL === 'true';
+
+        if (isLocalEnv) {
+          try {
+            const testAccount = await nodemailer.createTestAccount();
+            const testTransporter = nodemailer.createTransport({
+              host: testAccount.smtp.host,
+              port: testAccount.smtp.port,
+              secure: testAccount.smtp.secure,
+              auth: {
+                user: testAccount.user,
+                pass: testAccount.pass,
+              },
+            });
+
+            const info = await testTransporter.sendMail({
+              from: `"Roomio (dev)" <${testAccount.user}>`,
+              to: options.to,
+              subject: options.subject,
+              html: options.html,
+              text: options.text || this.extractTextFromHtml(options.html),
+            });
+
+            console.log('✅ Email delivered via Nodemailer test account (Ethereal).');
+            const previewUrl = nodemailer.getTestMessageUrl(info);
+            if (previewUrl) {
+              console.log(`🔍 Preview URL: ${previewUrl}`);
+            }
+            return true;
+          } catch (testError: any) {
+            console.error('❌ Failed to send via Nodemailer test account:', testError.message);
+          }
+        }
+
         console.log('📧 Email not configured - credentials will be logged instead');
         this.logCredentialsToConsole(options);
         return false;
@@ -293,7 +331,7 @@ export class EmailService {
 
   static logCredentialsToConsole(options: EmailOptions) {
     console.log('\n' + '='.repeat(60));
-    console.log('ðŸ“§ EMAIL NOTIFICATION (Development Mode)');
+    console.log('ðŸ"§ EMAIL NOTIFICATION (Development Mode)');
     console.log('='.repeat(60));
     console.log(`To: ${options.to}`);
     console.log(`Subject: ${options.subject}`);
@@ -305,14 +343,14 @@ export class EmailService {
       const passwordMatch = options.html.match(/Temporary Password:<\/span>\s*<span[^>]*>([^<]+)<\/span>/);
       
       if (usernameMatch && passwordMatch) {
-        console.log('ðŸ” TEMPORARY CREDENTIALS:');
+        console.log('ðŸ"0 TEMPORARY CREDENTIALS:');
         console.log(`   Username/Email: ${usernameMatch[1]}`);
         console.log(`   Password: ${passwordMatch[1]}`);
         console.log('='.repeat(60));
       }
     }
     
-    console.log('ðŸ“§ In production, this would be sent via email');
+    console.log('ðŸ"§ In production, this would be sent via email');
     console.log('='.repeat(60) + '\n');
   }
 
@@ -459,7 +497,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸ  Welcome to LTS Portal</h1>
+          <h1>ðŸ  Welcome to LTS Portal</h1>
           <p>Your Hostel Admin Account is Ready!</p>
         </div>
         
@@ -476,7 +514,7 @@ export class EmailService {
           <p>Your account has been created and you can now access your admin dashboard using the temporary credentials below:</p>
           
           <div class="credentials-box">
-            <h3>ðŸ” Your Temporary Login Credentials</h3>
+            <h3>ðŸ"0 Your Temporary Login Credentials</h3>
             <div class="credential-item">
               <span class="credential-label">Username/Email:</span>
               <span class="credential-value">${temporaryUsername}</span>
@@ -488,7 +526,7 @@ export class EmailService {
           </div>
           
           <div class="warning">
-            <strong>âš ï¸ Important Security Notice:</strong>
+            <strong>âš ï¸ Important Security Notice:</strong>
             <ul>
               <li>This is a temporary password that you must change immediately after your first login</li>
               <li>Do not share these credentials with anyone</li>
@@ -498,7 +536,7 @@ export class EmailService {
           
           ${subscriptionDetails ? `
           <div class="receipt-box">
-            <div class="receipt-header">ðŸ“„ Subscription Receipt</div>
+            <div class="receipt-header">ðŸ"„ Subscription Receipt</div>
             
             <div class="receipt-item">
               <span class="receipt-label">Subscription Plan:</span>
@@ -632,14 +670,14 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸ”’ Password Changed Successfully</h1>
+          <h1>ðŸ" Password Changed Successfully</h1>
         </div>
         
         <div class="content">
           <h2>Hello ${adminName}!</h2>
           
           <div class="success-box">
-            <strong>âœ… Your password has been successfully changed!</strong>
+            <strong>âœ Your password has been successfully changed!</strong>
           </div>
           
           <p>This is to confirm that your password was changed on <strong>${changeTime}</strong>.</p>
@@ -673,7 +711,8 @@ export class EmailService {
     performedByName?: string,
     performedByLabel?: string,
     accessNumber?: string | null,
-    expectedPrice?: number | null
+    expectedPrice?: number | null,
+    verificationCode?: string
   ): string {
     return `
       <!DOCTYPE html>
@@ -695,7 +734,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h2>${hostelName ? hostelName + ' â€” ' : ''}Booking Confirmation</h2>
+          <h2>${hostelName ? hostelName + ' €" ' : ''}Booking Confirmation</h2>
           <p>Hello ${studentName}, your hostel booking has been confirmed.</p>
         </div>
         <div class="content">
@@ -709,6 +748,11 @@ export class EmailService {
           ${balanceAfter !== null ? `<div class="row"><span class="label">Balance Remaining</span><span class="value">${currency} ${balanceAfter.toFixed(2)}</span></div>` : ''}
           <div class="row"><span class="label">Booking Date</span><span class="value">${paidAt}</span></div>
           ${performedByName ? `<div class="row"><span class="label">${performedByLabel || 'Registered by'}</span><span class="value">${performedByName}</span></div>` : ''}
+          ${verificationCode ? `
+          <div class="highlight">
+            <strong>Verification Code:</strong> ${verificationCode}<br/>
+            Present this code to the custodian on reporting day for check-in.
+          </div>` : ''}
           ${balanceAfter !== null && balanceAfter > 0 ? `
           <div class="highlight">
             <strong>Payment Reminder:</strong> Please pay your remaining balance of ${currency} ${balanceAfter.toFixed(2)} before the semester starts.
@@ -1001,7 +1045,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸ” Password Reset Request</h1>
+          <h1>ðŸ"0 Password Reset Request</h1>
           <p>Your OTP Code</p>
         </div>
         
@@ -1017,7 +1061,7 @@ export class EmailService {
           </div>
           
           <div class="warning">
-            <strong>âš ï¸ Security Notice:</strong>
+            <strong>âš ï¸ Security Notice:</strong>
             <ul style="margin: 10px 0; padding-left: 20px;">
               <li>Never share this OTP code with anyone</li>
               <li>If you didn't request this reset, please ignore this email</li>
@@ -1109,14 +1153,14 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>âœ… Password Reset Successful</h1>
+          <h1>âœ Your password has been successfully reset!</h1>
         </div>
         
         <div class="content">
           <h2>Hello ${userName}!</h2>
           
           <div class="success-box">
-            <strong>âœ… Your password has been successfully reset!</strong>
+            <strong>âœ Your password has been successfully reset!</strong>
           </div>
           
           <div class="info-box">
@@ -1131,7 +1175,7 @@ export class EmailService {
           </p>
           
           <div class="success-box" style="background: #fff3cd; border: 1px solid #ffeaa7; color: #856404;">
-            <strong>âš ï¸ Security Notice:</strong>
+            <strong>âš ï¸ Security Notice:</strong>
             <p style="margin: 10px 0 0 0;">
               If you did not reset your password, please contact our support team immediately.
               Your account may have been compromised.
@@ -1274,7 +1318,7 @@ export class EmailService {
           </div>
           
           <div class="warning-box" style="background: #eff6ff; border: 2px solid #3b82f6; color: #1e40af;">
-            <strong>ðŸ“¢ Action Required:</strong>
+            <strong>ðŸ"¢ Action Required:</strong>
             <p style="margin: 10px 0 0 0;">
               Please contact the Super Admin to renew your subscription immediately to avoid service interruption.
             </p>
@@ -1372,7 +1416,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸ”´ Subscription Expired</h1>
+          <h1>ðŸ"´ Subscription Expired</h1>
           <p style="margin: 10px 0 0 0; opacity: 0.9;">Service Interruption Notice</p>
         </div>
         
@@ -1380,7 +1424,7 @@ export class EmailService {
           <h2>Hello ${userName}!</h2>
           
           <div class="alert-box">
-            <p style="margin: 0; font-size: 18px; font-weight: bold;">âš ï¸ URGENT: SUBSCRIPTION EXPIRED</p>
+            <p style="margin: 0; font-size: 18px; font-weight: bold;">âš ï¸ URGENT: SUBSCRIPTION EXPIRED</p>
             <p style="margin: 10px 0 0 0;">Your access to LTS Portal has been suspended</p>
           </div>
           
@@ -1506,7 +1550,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸŽ“ Semester Completed!</h1>
+          <h1>ðŸŽ" Semester Completed!</h1>
           <p style="margin: 10px 0 0 0; opacity: 0.9;">Congratulations on completing ${semesterName}</p>
         </div>
         
@@ -1514,7 +1558,7 @@ export class EmailService {
           <h2>Hello ${studentName}!</h2>
           
           <div class="success-box">
-            <strong>âœ… Congratulations! You have successfully completed ${semesterName}.</strong>
+            <strong>âœ Congratulations! You have successfully completed ${semesterName}.</strong>
           </div>
           
           <p>Your semester at <strong>${hostelName}</strong> has come to an end. Thank you for being part of our community!</p>
@@ -1639,7 +1683,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1>ðŸ“… Semester Starting Soon</h1>
+          <h1>ðŸ" Semester Starting Soon</h1>
           <p style="margin: 10px 0 0 0; opacity: 0.9;">Get Ready!</p>
         </div>
         
@@ -1647,7 +1691,7 @@ export class EmailService {
           <h2>Hello ${studentName}!</h2>
           
           <div class="reminder-box">
-            <p style="margin: 0; font-size: 16px; font-weight: bold;">ðŸ“š SEMESTER STARTS IN</p>
+            <p style="margin: 0; font-size: 16px; font-weight: bold;">ðŸ" Semester STARTS IN</p>
             <div class="days-badge">${daysUntilStart}</div>
             <p style="margin: 10px 0 0 0;">${daysUntilStart === 1 ? 'day' : 'days'}</p>
           </div>
@@ -1787,7 +1831,7 @@ export class EmailService {
       </head>
       <body>
         <div class="header">
-          <h1 style="margin: 0; font-size: 28px;">ðŸŽ‰ Thank You!</h1>
+          <h1 style="margin: 0; font-size: 28px;">ðŸŽ" Thank You!</h1>
           <p style="margin: 10px 0 0 0; font-size: 18px; opacity: 0.95;">Your Balance is Fully Paid!</p>
         </div>
         
@@ -1795,12 +1839,12 @@ export class EmailService {
           <h2 style="color: #16a34a;">Hello ${studentName}!</h2>
           
           <div class="success-box">
-            <p style="margin: 0; font-size: 20px; font-weight: bold;">âœ… FULLY PAID!</p>
+            <p style="margin: 0; font-size: 20px; font-weight: bold;">âœ FullY PAID!</p>
             <p style="margin: 10px 0 0 0; font-size: 16px;">All outstanding balance has been cleared</p>
           </div>
           
           <div class="welcome-message">
-            <h3 style="margin-top: 0; color: #1e40af;">ðŸ  Welcome to ${hostelName}!</h3>
+            <h3 style="margin-top: 0; color: #1e40af;">ðŸ Welcome to ${hostelName}!</h3>
             <p style="margin: 0;">We are absolutely delighted to have you join our hostel community!</p>
           </div>
           
@@ -1833,12 +1877,12 @@ export class EmailService {
             </div>
             <div class="info-row">
               <span class="info-label">Payment Status:</span>
-              <span class="info-value" style="color: #16a34a;">âœ“ Complete</span>
+              <span class="info-value" style="color: #16a34a;">âœ" Complete</span>
             </div>
           </div>
           
           <div class="highlight">
-            <strong>ðŸŽŠ Congratulations!</strong>
+            <strong>ðŸŽ Congratulations!</strong>
             <p style="margin: 10px 0 0 0;">
               You have successfully cleared all your financial obligations for this semester. 
               Your account is in good standing and you are all set to enjoy your time with us!
@@ -1871,6 +1915,242 @@ export class EmailService {
         <div class="footer">
           <p>This email was sent automatically. Please do not reply to this email.</p>
           <p>Â© 2024 LTS Portal. All rights reserved.</p>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  static generatePublicBookingConfirmationEmail({
+    studentName,
+    studentEmail,
+    studentPhone,
+    registrationNumber,
+    course,
+    semesterName,
+    hostelName,
+    verificationCode,
+    bookingReference,
+    bookingFee,
+    roomPrice,
+    outstandingBalance,
+    currency,
+    paymentPhone,
+    roomNumber,
+    availableSpaces,
+    availableRooms,
+    portalUrl,
+  }: {
+    studentName: string;
+    studentEmail?: string | null;
+    studentPhone?: string | null;
+    registrationNumber?: string | null;
+    course?: string | null;
+    semesterName?: string | null;
+    hostelName: string;
+    verificationCode: string;
+    bookingReference: string;
+    bookingFee: number;
+    roomPrice: number;
+    outstandingBalance: number;
+    currency: string;
+    paymentPhone: string;
+    roomNumber?: string | null;
+    availableSpaces: number;
+    availableRooms: number;
+    portalUrl?: string;
+  }): string {
+    const formattedFee = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(bookingFee);
+
+    const formattedRoomPrice = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(roomPrice);
+
+    const formattedOutstanding = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(outstandingBalance);
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Your RooMio booking is pending payment</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #f0f4ff;
+            color: #1f2937;
+            margin: 0;
+            padding: 0;
+          }
+          .wrapper {
+            max-width: 640px;
+            margin: 0 auto;
+            padding: 24px;
+          }
+          .card {
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 18px 40px rgba(30, 64, 175, 0.1);
+            overflow: hidden;
+          }
+          .hero {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
+            padding: 36px 32px;
+            text-align: center;
+          }
+          .hero h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+          }
+          .content {
+            padding: 32px;
+          }
+          .code-box {
+            background: #eff6ff;
+            border: 1px dashed #2563eb;
+            padding: 16px;
+            border-radius: 12px;
+            text-align: center;
+            margin: 18px 0;
+          }
+          .code-box span {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: 6px;
+            color: #1d4ed8;
+          }
+          .summary {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 18px 0;
+            border: 1px solid #e5e7eb;
+          }
+          .summary-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+          }
+          .summary-label {
+            font-weight: 600;
+            color: #4b5563;
+          }
+          .summary-value {
+            font-weight: 600;
+            color: #111827;
+          }
+          ul {
+            padding-left: 20px;
+          }
+          .footer {
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+            margin-top: 24px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="wrapper">
+          <div class="card">
+            <div class="hero">
+              <h1>Booking received for ${hostelName}</h1>
+              <p style="margin: 12px 0 0 0; opacity: 0.85;">
+                Pay the booking fee and carry the code below when reporting to the hostel.
+              </p>
+            </div>
+            <div class="content">
+              <p>Hi ${studentName},</p>
+              <p>
+                Thanks for booking with RooMio. Please complete payment to secure your space at <strong>${hostelName}</strong>.
+                Share the verification code below when you arrive so the custodian can check you in.
+              </p>
+              <div class="code-box">
+                <div style="font-size: 12px; text-transform: uppercase; color: #1f2937; letter-spacing: 2px;">
+                  Verification code
+                </div>
+                <span>${verificationCode}</span>
+              </div>
+              <div class="summary">
+                <div class="summary-row">
+                  <span class="summary-label">Booking reference</span>
+                  <span class="summary-value">${bookingReference}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Semester</span>
+                  <span class="summary-value">${semesterName || 'Upcoming semester'}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Total room price</span>
+                  <span class="summary-value">${formattedRoomPrice}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Booking fee paid</span>
+                  <span class="summary-value">${formattedFee}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Outstanding balance</span>
+                  <span class="summary-value">${formattedOutstanding}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Pay via phone</span>
+                  <span class="summary-value">${paymentPhone}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Room</span>
+                  <span class="summary-value">${roomNumber ? `Room ${roomNumber}` : 'Requested room'}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Availability</span>
+                  <span class="summary-value">${availableRooms} rooms total • ${availableSpaces} space${availableSpaces === 1 ? '' : 's'} left in this room</span>
+                </div>
+              </div>
+              <div class="summary" style="margin-top: 20px;">
+                <div class="summary-row">
+                  <span class="summary-label">Student email</span>
+                  <span class="summary-value">${studentEmail || '—'}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Phone</span>
+                  <span class="summary-value">${studentPhone || '—'}</span>
+                </div>
+                ${registrationNumber ? `<div class="summary-row"><span class="summary-label">Registration number</span><span class="summary-value">${registrationNumber}</span></div>` : ''}
+                ${course ? `<div class="summary-row"><span class="summary-label">Course</span><span class="summary-value">${course}</span></div>` : ''}
+              </div>
+              <p style="margin-top: 18px;">
+                <strong>Next steps:</strong>
+              </p>
+              <ul>
+                <li>Send the booking fee to the number above.</li>
+                <li>Keep your payment reference and this verification code safe.</li>
+                <li>Present the code to the custodian together with your payment proof and clear the outstanding balance of ${formattedOutstanding} during check-in.</li>
+              </ul>
+              <p style="margin-top: 24px;">
+                Need to review your booking or browse more hostels? Visit
+                <a href="${portalUrl}" style="color: #2563eb; text-decoration: none;">${portalUrl}</a>.
+              </p>
+              <p style="margin-top: 24px;">Warm regards,<br/>The RooMio Team</p>
+            </div>
+          </div>
+          <div class="footer">
+            You're receiving this email because you submitted a booking request via RooMio Hostels.
+          </div>
         </div>
       </body>
       </html>

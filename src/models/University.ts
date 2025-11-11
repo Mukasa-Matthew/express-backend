@@ -10,6 +10,7 @@ export interface University {
   contact_phone?: string | null;
   contact_email?: string | null;
   website?: string | null;
+  image_url?: string | null;
   status: 'active' | 'inactive' | 'suspended';
   created_at: Date;
   updated_at: Date;
@@ -23,6 +24,7 @@ export interface CreateUniversityData {
   contact_phone?: string;
   contact_email?: string;
   website?: string;
+  image_url?: string;
   status?: 'active' | 'inactive' | 'suspended';
 }
 
@@ -34,6 +36,7 @@ export interface UpdateUniversityData {
   contact_phone?: string;
   contact_email?: string;
   website?: string;
+  image_url?: string | null;
   status?: 'active' | 'inactive' | 'suspended';
 }
 
@@ -55,6 +58,7 @@ function prismaUniversityToUniversity(prismaUni: PrismaUniversity & { region?: {
     contact_phone: prismaUni.contactPhone,
     contact_email: prismaUni.contactEmail,
     website: prismaUni.website,
+    image_url: prismaUni.imageUrl,
     status: prismaUni.status as University['status'],
     created_at: prismaUni.createdAt,
     updated_at: prismaUni.updatedAt,
@@ -73,6 +77,7 @@ export class UniversityModel {
         contactPhone: data.contact_phone || null,
         contactEmail: data.contact_email || null,
         website: data.website || null,
+        imageUrl: data.image_url || null,
         status: (data.status || 'active') as PrismaUniversity['status'],
       },
     });
@@ -114,6 +119,7 @@ export class UniversityModel {
     if (data.contact_phone !== undefined) prismaUpdateData.contactPhone = data.contact_phone || null;
     if (data.contact_email !== undefined) prismaUpdateData.contactEmail = data.contact_email || null;
     if (data.website !== undefined) prismaUpdateData.website = data.website || null;
+    if (data.image_url !== undefined) prismaUpdateData.imageUrl = data.image_url || null;
     if (data.region_id !== undefined) {
       if (data.region_id) {
         prismaUpdateData.region = { connect: { id: data.region_id } };
