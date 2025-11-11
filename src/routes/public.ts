@@ -133,9 +133,9 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
       ) pending_bookings ON TRUE
     `;
 
-  const query = `
+    const query = `
     WITH room_availability AS (
-      SELECT
+        SELECT
         r.hostel_id,
         COUNT(*) AS total_rooms,
         COUNT(*) FILTER (
@@ -146,10 +146,10 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
         MAX(r.price) FILTER (WHERE r.price IS NOT NULL) AS max_price,
         AVG(r.price) FILTER (WHERE r.price IS NOT NULL) AS avg_price
       FROM rooms r
-      LEFT JOIN LATERAL (
+        LEFT JOIN LATERAL (
         SELECT COUNT(*) AS active_count
-        FROM student_room_assignments sra
-        WHERE sra.room_id = r.id AND sra.status = 'active'
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id AND sra.status = 'active'
       ) active_assignments ON TRUE
       ${pendingBookingsJoin}
       GROUP BY r.hostel_id
@@ -167,18 +167,18 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
         FROM hostel_images hi
       ) ranked
       WHERE row_number = 1
-    )
-    SELECT
-      h.id,
-      h.name,
-      h.address,
-      h.description,
-      h.booking_fee,
-      h.amenities,
+      )
+      SELECT
+        h.id,
+        h.name,
+        h.address,
+        h.description,
+        h.booking_fee,
+        h.amenities,
       h.distance_from_campus,
       h.occupancy_type,
-      h.latitude,
-      h.longitude,
+        h.latitude,
+        h.longitude,
       h.is_published,
       h.price_per_room,
       ra.total_rooms,
@@ -187,10 +187,10 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
       ra.max_price,
       ra.avg_price,
       pi.image_url AS primary_image
-    FROM hostels h
+      FROM hostels h
     LEFT JOIN room_availability ra ON ra.hostel_id = h.id
     LEFT JOIN primary_image pi ON pi.hostel_id = h.id
-    ${whereClause}
+      ${whereClause}
     ORDER BY h.name ASC
   `;
 
@@ -337,8 +337,17 @@ router.get('/universities/:id/hostels', async (req, res) => {
   }
 
   try {
+    const universityImageColumnCheck = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'universities'
+          AND column_name = 'image_url'
+        LIMIT 1`,
+    );
+    const universityImageSelect = universityImageColumnCheck.rowCount ? 'image_url' : 'NULL::text AS image_url';
+
     const universityResult = await pool.query(
-      `SELECT id, name, code, address, contact_email, contact_phone, website, image_url
+      `SELECT id, name, code, address, contact_email, contact_phone, website, status, ${universityImageColumnCheck.rowCount ? 'image_url' : 'NULL::text AS image_url'}
        FROM universities
        WHERE id = $1`,
       [universityId],
