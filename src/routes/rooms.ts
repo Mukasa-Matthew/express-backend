@@ -98,6 +98,9 @@ router.get('/available', async (req, res) => {
     const semesterIdRaw = req.query.semester_id ? parseInt(String(req.query.semester_id), 10) : null;
     const semesterId = Number.isInteger(semesterIdRaw) ? semesterIdRaw : null;
 
+    const tableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+    const hasPublicBookings = Boolean(tableCheck.rows[0]?.table_ref);
+
     const params: any[] = [hostelId];
     let nextIndex = 2;
 
@@ -110,6 +113,22 @@ router.get('/available', async (req, res) => {
       assignmentsSemesterFilter = `AND (sra.semester_id = $${nextIndex} OR sra.semester_id IS NULL)`;
       nextIndex += 1;
     }
+
+    const pendingBookingsJoin = hasPublicBookings
+      ? `
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS booking_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            ${bookingsSemesterFilter}
+        ) pending_bookings ON true
+      `
+      : `
+        LEFT JOIN LATERAL (
+          SELECT 0 AS booking_count
+        ) pending_bookings ON true
+      `;
 
     const result = await pool.query(
       `
@@ -127,13 +146,7 @@ router.get('/available', async (req, res) => {
             AND sra.status = 'active'
             ${assignmentsSemesterFilter}
         ) active_assignments ON true
-        LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS booking_count
-          FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id
-            AND pb.status IN ('pending', 'booked', 'checked_in')
-            ${bookingsSemesterFilter}
-        ) pending_bookings ON true
+        ${pendingBookingsJoin}
         WHERE r.hostel_id = $1
           AND r.status = 'available'
           AND (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) > 0
