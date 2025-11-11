@@ -138,7 +138,20 @@ export class UniversityModel {
     if (data.contact_phone !== undefined) prismaUpdateData.contactPhone = data.contact_phone || null;
     if (data.contact_email !== undefined) prismaUpdateData.contactEmail = data.contact_email || null;
     if (data.website !== undefined) prismaUpdateData.website = data.website || null;
-    if (data.image_url !== undefined) (prismaUpdateData as any).image_url = data.image_url || null;
+    if (data.image_url !== undefined) {
+      const hasImageColumnCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name = 'universities'
+             AND column_name = 'image_url'
+         ) AS exists`);
+      const hasImageColumn = Boolean(hasImageColumnCheck[0]?.exists);
+      if (hasImageColumn) {
+        (prismaUpdateData as any).image_url = data.image_url || null;
+      }
+    }
     if (data.region_id !== undefined) {
       if (data.region_id) {
         prismaUpdateData.region = { connect: { id: data.region_id } };
