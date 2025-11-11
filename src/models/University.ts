@@ -93,7 +93,7 @@ export class UniversityModel {
          ) AS exists`);
       const hasImageColumn = Boolean(hasImageColumnCheck[0]?.exists);
       if (hasImageColumn) {
-        (createPayload as any).image_url = data.image_url || null;
+        createPayload.imageUrl = data.image_url || null;
       }
     }
 
@@ -149,7 +149,7 @@ export class UniversityModel {
          ) AS exists`);
       const hasImageColumn = Boolean(hasImageColumnCheck[0]?.exists);
       if (hasImageColumn) {
-        (prismaUpdateData as any).image_url = data.image_url || null;
+        prismaUpdateData.imageUrl = data.image_url || null;
       }
     }
     if (data.region_id !== undefined) {
