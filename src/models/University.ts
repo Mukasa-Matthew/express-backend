@@ -68,18 +68,26 @@ function prismaUniversityToUniversity(prismaUni: PrismaUniversity & { region?: {
 
 export class UniversityModel {
   static async create(data: CreateUniversityData): Promise<University> {
+    const createPayload: Prisma.UniversityCreateInput = {
+      name: data.name,
+      code: data.code || null,
+      address: data.address || null,
+      contactPhone: data.contact_phone || null,
+      contactEmail: data.contact_email || null,
+      website: data.website || null,
+      status: (data.status || 'active') as PrismaUniversity['status'],
+    };
+
+    if (data.region_id) {
+      createPayload.region = { connect: { id: data.region_id } };
+    }
+
+    if (data.image_url !== undefined) {
+      (createPayload as any).image_url = data.image_url || null;
+    }
+
     const prismaUni = await prisma.university.create({
-      data: {
-        name: data.name,
-        code: data.code || null,
-        regionId: data.region_id || null,
-        address: data.address || null,
-        contactPhone: data.contact_phone || null,
-        contactEmail: data.contact_email || null,
-        website: data.website || null,
-        image_url: data.image_url || null,
-        status: (data.status || 'active') as PrismaUniversity['status'],
-      } as any,
+      data: createPayload,
     });
     
     return prismaUniversityToUniversity(prismaUni);
