@@ -347,7 +347,7 @@ router.get('/universities/:id/hostels', async (req, res) => {
     const universityImageSelect = universityImageColumnCheck.rowCount ? 'image_url' : 'NULL::text AS image_url';
 
     const universityResult = await pool.query(
-      `SELECT id, name, code, address, contact_email, contact_phone, website, status, ${universityImageColumnCheck.rowCount ? 'image_url' : 'NULL::text AS image_url'}
+      `SELECT id, name, code, address, contact_email, contact_phone, website, status, ${universityImageSelect}
        FROM universities
        WHERE id = $1`,
       [universityId],
