@@ -116,9 +116,26 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const query = `
+  const bookingsTableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+  const hasPublicBookingsTable = Boolean(bookingsTableCheck.rows[0]?.table_ref);
+
+  const pendingBookingsJoin = hasPublicBookingsTable
+    ? `
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS booking_count
+        FROM public_hostel_bookings pb
+        WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+      ) pending_bookings ON TRUE
+    `
+    : `
+      LEFT JOIN LATERAL (
+        SELECT 0::bigint AS booking_count
+      ) pending_bookings ON TRUE
+    `;
+
+  const query = `
     WITH room_availability AS (
-        SELECT
+      SELECT
         r.hostel_id,
         COUNT(*) AS total_rooms,
         COUNT(*) FILTER (
@@ -129,16 +146,12 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
         MAX(r.price) FILTER (WHERE r.price IS NOT NULL) AS max_price,
         AVG(r.price) FILTER (WHERE r.price IS NOT NULL) AS avg_price
       FROM rooms r
-        LEFT JOIN LATERAL (
-        SELECT COUNT(*) AS active_count
-          FROM student_room_assignments sra
-          WHERE sra.room_id = r.id AND sra.status = 'active'
-      ) active_assignments ON TRUE
       LEFT JOIN LATERAL (
-        SELECT COUNT(*) AS booking_count
-        FROM public_hostel_bookings pb
-        WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
-      ) pending_bookings ON TRUE
+        SELECT COUNT(*) AS active_count
+        FROM student_room_assignments sra
+        WHERE sra.room_id = r.id AND sra.status = 'active'
+      ) active_assignments ON TRUE
+      ${pendingBookingsJoin}
       GROUP BY r.hostel_id
     ),
     primary_image AS (
@@ -154,18 +167,18 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
         FROM hostel_images hi
       ) ranked
       WHERE row_number = 1
-      )
-      SELECT
-        h.id,
-        h.name,
-        h.address,
-        h.description,
-        h.booking_fee,
-        h.amenities,
+    )
+    SELECT
+      h.id,
+      h.name,
+      h.address,
+      h.description,
+      h.booking_fee,
+      h.amenities,
       h.distance_from_campus,
       h.occupancy_type,
-        h.latitude,
-        h.longitude,
+      h.latitude,
+      h.longitude,
       h.is_published,
       h.price_per_room,
       ra.total_rooms,
@@ -174,10 +187,10 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
       ra.max_price,
       ra.avg_price,
       pi.image_url AS primary_image
-      FROM hostels h
+    FROM hostels h
     LEFT JOIN room_availability ra ON ra.hostel_id = h.id
     LEFT JOIN primary_image pi ON pi.hostel_id = h.id
-      ${whereClause}
+    ${whereClause}
     ORDER BY h.name ASC
   `;
 
@@ -187,6 +200,23 @@ async function fetchHostelSummaries(filters?: HostelSummaryFilters): Promise<Hos
 
 router.get('/universities-with-hostels', async (_req, res) => {
   try {
+    const bookingsTableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+    const hasPublicBookingsTable = Boolean(bookingsTableCheck.rows[0]?.table_ref);
+
+    const pendingBookingsJoin = hasPublicBookingsTable
+      ? `
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS booking_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+        ) pending_bookings ON TRUE
+      `
+      : `
+        LEFT JOIN LATERAL (
+          SELECT 0::bigint AS booking_count
+        ) pending_bookings ON TRUE
+      `;
+
     const query = `
       WITH room_availability AS (
         SELECT
@@ -205,11 +235,7 @@ router.get('/universities-with-hostels', async (_req, res) => {
           FROM student_room_assignments sra
           WHERE sra.room_id = r.id AND sra.status = 'active'
         ) active_assignments ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS booking_count
-          FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
-        ) pending_bookings ON TRUE
+        ${pendingBookingsJoin}
         GROUP BY r.hostel_id
       ),
       primary_image AS (
@@ -389,6 +415,23 @@ router.get('/hostels/:id', async (req, res) => {
   }
 
   try {
+    const bookingsTableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+    const hasPublicBookingsTable = Boolean(bookingsTableCheck.rows[0]?.table_ref);
+
+    const pendingBookingsJoin = hasPublicBookingsTable
+      ? `
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS booking_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+        ) pending_bookings ON TRUE
+      `
+      : `
+        LEFT JOIN LATERAL (
+          SELECT 0::bigint AS booking_count
+        ) pending_bookings ON TRUE
+      `;
+
     const hostelQuery = `
       WITH room_availability AS (
         SELECT
@@ -407,11 +450,7 @@ router.get('/hostels/:id', async (req, res) => {
           FROM student_room_assignments sra
           WHERE sra.room_id = r.id AND sra.status = 'active'
         ) active_assignments ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS booking_count
-          FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
-        ) pending_bookings ON TRUE
+        ${pendingBookingsJoin}
         GROUP BY r.hostel_id
       )
       SELECT 
@@ -474,27 +513,23 @@ router.get('/hostels/:id', async (req, res) => {
         r.room_number,
         r.capacity,
         r.status,
-          r.price,
-          r.description,
-          r.self_contained,
-          COALESCE(active_assignments.active_count, 0) AS active_occupants,
-          COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
-          COALESCE(active_assignments.active_count, 0) + COALESCE(pending_bookings.booking_count, 0) AS occupied_count,
-          GREATEST(
-            r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0),
-            0
-          ) AS available_spaces
+        r.price,
+        r.description,
+        r.self_contained,
+        COALESCE(active_assignments.active_count, 0) AS active_occupants,
+        COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
+        COALESCE(active_assignments.active_count, 0) + COALESCE(pending_bookings.booking_count, 0) AS occupied_count,
+        GREATEST(
+          r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0),
+          0
+        ) AS available_spaces
       FROM rooms r
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS active_count
           FROM student_room_assignments sra
           WHERE sra.room_id = r.id AND sra.status = 'active'
         ) active_assignments ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS booking_count
-          FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
-        ) pending_bookings ON TRUE
+        ${pendingBookingsJoin}
       WHERE r.hostel_id = $1
       ORDER BY r.room_number ASC
       `,
