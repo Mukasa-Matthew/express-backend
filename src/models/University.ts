@@ -83,7 +83,18 @@ export class UniversityModel {
     }
 
     if (data.image_url !== undefined) {
-      (createPayload as any).image_url = data.image_url || null;
+      const hasImageColumnCheck = await prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name = 'universities'
+             AND column_name = 'image_url'
+         ) AS exists`);
+      const hasImageColumn = Boolean(hasImageColumnCheck[0]?.exists);
+      if (hasImageColumn) {
+        (createPayload as any).image_url = data.image_url || null;
+      }
     }
 
     const prismaUni = await prisma.university.create({
