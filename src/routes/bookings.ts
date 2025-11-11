@@ -774,6 +774,49 @@ router.get('/', async (req, res) => {
 
     const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
+    const bookingsTableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+    const hasPublicBookingsTable = Boolean(bookingsTableCheck.rows[0]?.table_ref);
+
+    if (!hasPublicBookingsTable) {
+      return res.json({
+        success: true,
+        data: [],
+        page,
+        limit,
+        total: 0,
+        totalPages: 1,
+      });
+    }
+
+    const paymentsTableCheck = await pool.query("SELECT to_regclass('public.public_booking_payments') AS table_ref");
+    const hasPublicBookingPaymentsTable = Boolean(paymentsTableCheck.rows[0]?.table_ref);
+
+    const latestPaymentJoin = hasPublicBookingPaymentsTable
+      ? `
+        LEFT JOIN LATERAL (
+          SELECT
+            p.method,
+            p.amount,
+            p.status,
+            p.reference,
+            p.recorded_at
+          FROM public_booking_payments p
+          WHERE p.booking_id = b.id
+          ORDER BY p.recorded_at DESC
+          LIMIT 1
+        ) latest_payment ON TRUE
+      `
+      : `
+        LEFT JOIN LATERAL (
+          SELECT
+            NULL::text AS method,
+            NULL::numeric AS amount,
+            NULL::text AS status,
+            NULL::text AS reference,
+            NULL::timestamptz AS recorded_at
+        ) latest_payment ON TRUE
+      `;
+
     const countResult = await pool.query(
       `
         SELECT COUNT(*) AS total
@@ -799,18 +842,7 @@ router.get('/', async (req, res) => {
         FROM public_hostel_bookings b
         LEFT JOIN semesters s ON s.id = b.semester_id
         LEFT JOIN rooms r ON r.id = b.room_id
-        LEFT JOIN LATERAL (
-          SELECT
-            p.method,
-            p.amount,
-            p.status,
-            p.reference,
-            p.recorded_at
-          FROM public_booking_payments p
-          WHERE p.booking_id = b.id
-          ORDER BY p.recorded_at DESC
-          LIMIT 1
-        ) latest_payment ON TRUE
+        ${latestPaymentJoin}
         ${whereClause}
         ORDER BY b.created_at DESC
         LIMIT ${limit} OFFSET ${offset}
