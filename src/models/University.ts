@@ -58,7 +58,7 @@ function prismaUniversityToUniversity(prismaUni: PrismaUniversity & { region?: {
     contact_phone: prismaUni.contactPhone,
     contact_email: prismaUni.contactEmail,
     website: prismaUni.website,
-    image_url: prismaUni.imageUrl,
+    image_url: (prismaUni as any).image_url ?? null,
     status: prismaUni.status as University['status'],
     created_at: prismaUni.createdAt,
     updated_at: prismaUni.updatedAt,
@@ -77,9 +77,9 @@ export class UniversityModel {
         contactPhone: data.contact_phone || null,
         contactEmail: data.contact_email || null,
         website: data.website || null,
-        imageUrl: data.image_url || null,
+        image_url: data.image_url || null,
         status: (data.status || 'active') as PrismaUniversity['status'],
-      },
+      } as any,
     });
     
     return prismaUniversityToUniversity(prismaUni);
@@ -119,7 +119,7 @@ export class UniversityModel {
     if (data.contact_phone !== undefined) prismaUpdateData.contactPhone = data.contact_phone || null;
     if (data.contact_email !== undefined) prismaUpdateData.contactEmail = data.contact_email || null;
     if (data.website !== undefined) prismaUpdateData.website = data.website || null;
-    if (data.image_url !== undefined) prismaUpdateData.imageUrl = data.image_url || null;
+    if (data.image_url !== undefined) (prismaUpdateData as any).image_url = data.image_url || null;
     if (data.region_id !== undefined) {
       if (data.region_id) {
         prismaUpdateData.region = { connect: { id: data.region_id } };
