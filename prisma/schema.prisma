@@ -118,6 +118,8 @@ model User {
   semesterEnrollments SemesterEnrollment[]
   twoFactor     UserTwoFactor?
   recordedPayments Payment[] @relation("PaymentRecorder")
+  publicBookingsCreated PublicHostelBooking[] @relation("PublicBookingsCreatedBy")
+  recordedPublicBookingPayments PublicBookingPayment[] @relation("PublicBookingPaymentRecorder")
   
   @@index([email], map: "idx_users_email")
   @@index([username], map: "idx_users_username")
@@ -141,6 +143,7 @@ model Room {
   hostel          Hostel                  @relation(fields: [hostelId], references: [id], onDelete: Cascade)
   assignments     StudentRoomAssignment[]
   semesterEnrollments SemesterEnrollment[]
+  publicBookings  PublicHostelBooking[] @relation("PublicBookingsRoom")
   
   @@unique([hostelId, roomNumber])
   @@map("rooms")
@@ -215,6 +218,7 @@ model Semester {
   enrollments     SemesterEnrollment[]
   assignments     StudentRoomAssignment[]
   payments        Payment[]
+  publicBookings  PublicHostelBooking[] @relation("PublicBookingsSemester")
   
   @@map("semesters")
 }
@@ -417,9 +421,9 @@ model PublicHostelBooking {
 
   hostel      Hostel      @relation(fields: [hostelId], references: [id], onDelete: Cascade)
   university  University? @relation(fields: [universityId], references: [id])
-  semester    Semester?   @relation(fields: [semesterId], references: [id])
-  room        Room?       @relation(fields: [roomId], references: [id])
-  createdBy   User?       @relation(fields: [createdByUserId], references: [id])
+  semester    Semester?   @relation("PublicBookingsSemester", fields: [semesterId], references: [id])
+  room        Room?       @relation("PublicBookingsRoom", fields: [roomId], references: [id])
+  createdBy   User?       @relation("PublicBookingsCreatedBy", fields: [createdByUserId], references: [id])
   payments    PublicBookingPayment[]
 
   @@index([hostelId], map: "idx_public_bookings_hostel_id")
@@ -444,7 +448,7 @@ model PublicBookingPayment {
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
   booking    PublicHostelBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  recordedBy User?               @relation(fields: [recordedByUserId], references: [id])
+  recordedBy User?               @relation("PublicBookingPaymentRecorder", fields: [recordedByUserId], references: [id])
 
   @@index([bookingId], map: "idx_public_booking_payments_booking_id")
   @@index([method], map: "idx_public_booking_payments_method")
