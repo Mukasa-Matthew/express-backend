@@ -561,33 +561,45 @@ router.get('/summary', async (req, res) => {
     const ledgerCollected = parseFloat(totalPaidRes.rows[0]?.total_collected || '0');
 
     // Include booking payments recorded via the bookings module
-    const bookingPaymentParams = semesterId ? [hostelId, semesterId] : [hostelId];
-    const bookingPaymentsQuery = semesterId
-      ? `
-        SELECT 
-          COALESCE(SUM(pbp.amount), 0) AS total_collected,
-          COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
-          COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
-        FROM public_booking_payments pbp
-        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
-        WHERE b.hostel_id = $1
-          AND b.semester_id = $2
-          AND pbp.status = 'completed'
-      `
-      : `
-        SELECT 
-          COALESCE(SUM(pbp.amount), 0) AS total_collected,
-          COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
-          COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
-        FROM public_booking_payments pbp
-        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
-        WHERE b.hostel_id = $1
-          AND pbp.status = 'completed'
-      `;
-    const bookingPaymentsRes = await pool.query(bookingPaymentsQuery, bookingPaymentParams);
-    const bookingPaymentsTotal = parseFloat(bookingPaymentsRes.rows[0]?.total_collected || '0');
-    const bookingAmountPaidTotal = parseFloat(bookingPaymentsRes.rows[0]?.amount_paid || '0');
-    const bookingOutstandingFromPayments = parseFloat(bookingPaymentsRes.rows[0]?.outstanding || '0');
+    // Check if public_booking_payments table exists
+    const bookingPaymentsTableCheck = await pool.query(
+      "SELECT to_regclass('public.public_booking_payments') AS table_ref"
+    );
+    const hasBookingPaymentsTable = Boolean(bookingPaymentsTableCheck.rows[0]?.table_ref);
+
+    let bookingPaymentsTotal = 0;
+    let bookingAmountPaidTotal = 0;
+    let bookingOutstandingFromPayments = 0;
+
+    if (hasBookingPaymentsTable) {
+      const bookingPaymentParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      const bookingPaymentsQuery = semesterId
+        ? `
+          SELECT 
+            COALESCE(SUM(pbp.amount), 0) AS total_collected,
+            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $2
+            AND pbp.status = 'completed'
+        `
+        : `
+          SELECT 
+            COALESCE(SUM(pbp.amount), 0) AS total_collected,
+            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          WHERE b.hostel_id = $1
+            AND pbp.status = 'completed'
+        `;
+      const bookingPaymentsRes = await pool.query(bookingPaymentsQuery, bookingPaymentParams);
+      bookingPaymentsTotal = parseFloat(bookingPaymentsRes.rows[0]?.total_collected || '0');
+      bookingAmountPaidTotal = parseFloat(bookingPaymentsRes.rows[0]?.amount_paid || '0');
+      bookingOutstandingFromPayments = parseFloat(bookingPaymentsRes.rows[0]?.outstanding || '0');
+    }
 
     const bookingsAggregateQuery = semesterId
       ? `
@@ -607,7 +619,8 @@ router.get('/summary', async (req, res) => {
         FROM public_hostel_bookings
         WHERE hostel_id = $1
       `;
-    const bookingsAggregateRes = await pool.query(bookingsAggregateQuery, bookingPaymentParams);
+    const bookingsAggregateParams = semesterId ? [hostelId, semesterId] : [hostelId];
+    const bookingsAggregateRes = await pool.query(bookingsAggregateQuery, bookingsAggregateParams);
     const bookingsAmountPaid = parseFloat(bookingsAggregateRes.rows[0]?.amount_paid || '0');
     const bookingsAmountDue = parseFloat(bookingsAggregateRes.rows[0]?.amount_due || '0');
     const bookingsOutstandingTotal = parseFloat(bookingsAggregateRes.rows[0]?.outstanding || '0');
@@ -665,28 +678,33 @@ router.get('/summary', async (req, res) => {
       ledgerMethodTotals = ledgerMethodRes.rows as RawMethodRow[];
     }
 
-    const bookingMethodQuery = semesterId
-      ? `
-        SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
-               COALESCE(SUM(pbp.amount), 0)::numeric AS total
-        FROM public_booking_payments pbp
-        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
-        WHERE b.hostel_id = $1
-          AND b.semester_id = $2
-          AND pbp.status = 'completed'
-        GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
-      `
-      : `
-        SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
-               COALESCE(SUM(pbp.amount), 0)::numeric AS total
-        FROM public_booking_payments pbp
-        JOIN public_hostel_bookings b ON b.id = pbp.booking_id
-        WHERE b.hostel_id = $1
-          AND pbp.status = 'completed'
-        GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
-      `;
-    const bookingMethodRes = await pool.query(bookingMethodQuery, bookingPaymentParams);
-    const bookingMethodTotals = bookingMethodRes.rows as RawMethodRow[];
+    // Get booking payment methods (only if table exists)
+    let bookingMethodTotals: RawMethodRow[] = [];
+    if (hasBookingPaymentsTable) {
+      const bookingMethodQuery = semesterId
+        ? `
+          SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
+                 COALESCE(SUM(pbp.amount), 0)::numeric AS total
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $2
+            AND pbp.status = 'completed'
+          GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
+        `
+        : `
+          SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
+                 COALESCE(SUM(pbp.amount), 0)::numeric AS total
+          FROM public_booking_payments pbp
+          JOIN public_hostel_bookings b ON b.id = pbp.booking_id
+          WHERE b.hostel_id = $1
+            AND pbp.status = 'completed'
+          GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
+        `;
+      const bookingMethodParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      const bookingMethodRes = await pool.query(bookingMethodQuery, bookingMethodParams);
+      bookingMethodTotals = bookingMethodRes.rows as RawMethodRow[];
+    }
 
     type MethodAggregate = {
       method: string;
@@ -837,7 +855,7 @@ router.get('/summary', async (req, res) => {
     }));
 
     let matchedBookingPaymentsTotal = 0;
-    if (bookingPaymentsTotal > 0) {
+    if (bookingPaymentsTotal > 0 && hasBookingPaymentsTable) {
       const bookingPaidByUserQuery = semesterId
         ? `
           SELECT u.id AS user_id, COALESCE(SUM(pbp.amount), 0)::numeric AS paid
@@ -862,9 +880,10 @@ router.get('/summary', async (req, res) => {
             AND pbp.status = 'completed'
           GROUP BY u.id
         `;
+      const bookingPaidByUserParams = semesterId ? [hostelId, semesterId] : [hostelId];
       const bookingPaidByUserRes = await pool.query(
         bookingPaidByUserQuery,
-        bookingPaymentParams,
+        bookingPaidByUserParams,
       );
       const bookingPaidMap = new Map<number, number>();
       bookingPaidByUserRes.rows.forEach((row: any) => {
