@@ -30,7 +30,8 @@ const storage = multer.diskStorage({
         fs.mkdirSync(uploadDir, { recursive: true });
       } catch (err) {
         console.error('Failed to create upload directory:', err);
-        return cb(new Error('Failed to create upload directory'));
+        cb(new Error('Failed to create upload directory'), '');
+        return;
       }
     }
     cb(null, uploadDir);
