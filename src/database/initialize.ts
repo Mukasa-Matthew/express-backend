@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
+import { runMigrations } from './migrations';
 
 dotenv.config();
 
@@ -70,6 +71,16 @@ export async function initializeDatabase(): Promise<void> {
     if (tablesExist) {
       // Ensure database schema matches Prisma schema
       await ensureSchemaMatches();
+      
+      // Run migrations to ensure all tables and columns are up to date
+      console.log('🔄 Running database migrations...');
+      try {
+        await runMigrations();
+      } catch (error: any) {
+        console.warn('⚠️  Migration warning:', error.message);
+        // Don't throw - migrations are non-critical, but log the warning
+      }
+      
       await setupSuperAdmin();
     }
     
