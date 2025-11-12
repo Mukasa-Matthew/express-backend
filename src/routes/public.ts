@@ -525,6 +525,16 @@ router.get('/hostels/:id', async (req, res) => {
       [hostelId],
     );
 
+    const roomDescriptionColumnCheck = await pool.query(
+      `SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'rooms'
+          AND column_name = 'description'
+        LIMIT 1`,
+    );
+    const roomDescriptionSelect = roomDescriptionColumnCheck.rowCount ? 'r.description' : 'NULL::text AS description';
+
     const roomsResult = await pool.query(
       `
       SELECT
@@ -533,7 +543,7 @@ router.get('/hostels/:id', async (req, res) => {
         r.capacity,
         r.status,
         r.price,
-        r.description,
+        ${roomDescriptionSelect},
         r.self_contained,
         COALESCE(active_assignments.active_count, 0) AS active_occupants,
         COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
