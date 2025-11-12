@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 import compression from 'compression';
 import morgan from 'morgan';
 import cron from 'node-cron';
+import fs from 'fs';
 import authRoutes from './routes/auth';
 import hostelRoutes from './routes/hostels';
 import analyticsRoutes from './routes/analytics';
@@ -34,6 +35,9 @@ dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '5000', 10);
+
+// Trust proxy - required when behind a reverse proxy/load balancer
+app.set('trust proxy', true);
 
 // Security: Helmet
 app.use(helmet({
@@ -185,6 +189,18 @@ app.use('/api/semesters', writeLimiter, semestersRoutes);
 app.use('/api/bookings', writeLimiter, bookingsRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/hostels', hostelImagesRoutes);
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(process.cwd(), 'uploads');
+const hostelImagesDir = path.join(uploadsDir, 'hostel-images');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Created uploads directory');
+}
+if (!fs.existsSync(hostelImagesDir)) {
+  fs.mkdirSync(hostelImagesDir, { recursive: true });
+  console.log('📁 Created hostel-images directory');
+}
 
 // Static uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));

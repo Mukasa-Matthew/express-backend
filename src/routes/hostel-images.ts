@@ -7,12 +7,31 @@ import { verifyTokenAndGetUser } from './hostels';
 
 const router = express.Router();
 
+// Ensure uploads directory exists on startup
+const uploadsBaseDir = path.join(process.cwd(), 'uploads');
+const hostelImagesDir = path.join(uploadsBaseDir, 'hostel-images');
+
+if (!fs.existsSync(uploadsBaseDir)) {
+  fs.mkdirSync(uploadsBaseDir, { recursive: true });
+  console.log('Created uploads directory');
+}
+
+if (!fs.existsSync(hostelImagesDir)) {
+  fs.mkdirSync(hostelImagesDir, { recursive: true });
+  console.log('Created hostel-images directory');
+}
+
 // Configure multer for image uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadDir = path.join(process.cwd(), 'uploads', 'hostel-images');
     if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
+      try {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      } catch (err) {
+        console.error('Failed to create upload directory:', err);
+        return cb(new Error('Failed to create upload directory'));
+      }
     }
     cb(null, uploadDir);
   },
@@ -41,7 +60,30 @@ const upload = multer({
 });
 
 // Upload hostel image (super_admin only)
-router.post('/:id/images', upload.single('image'), async (req, res) => {
+router.post('/:id/images', (req, res, next) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) {
+      console.error('Multer upload error:', err);
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            success: false,
+            message: 'File size too large. Maximum size is 10MB'
+          });
+        }
+        return res.status(400).json({
+          success: false,
+          message: `Upload error: ${err.message}`
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: err.message || 'File upload failed'
+      });
+    }
+    next();
+  });
+}, async (req, res) => {
   const client = await pool.connect();
   try {
     // Verify super admin
@@ -131,9 +173,17 @@ router.post('/:id/images', upload.single('image'), async (req, res) => {
       }
     }
     console.error('Error uploading hostel image:', error);
+    console.error('Error details:', {
+      message: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+      hostelId: req.params.id,
+      hasFile: !!req.file,
+      fileSize: req.file?.size,
+      fileName: req.file?.filename
+    });
     res.status(500).json({
       success: false,
-      message: 'Failed to upload image'
+      message: error instanceof Error ? error.message : 'Failed to upload image'
     });
   } finally {
     client.release();
