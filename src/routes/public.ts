@@ -1,6 +1,7 @@
 import express from 'express';
 import pool from '../config/database';
 import { HostelModel } from '../models/Hostel';
+import { EmailService } from '../services/emailService';
 
 const router = express.Router();
 
@@ -832,6 +833,301 @@ router.get('/regions', async (req, res) => {
     });
   }
 });
+
+// Helper function to generate verification code
+function generateVerificationCode(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return code;
+}
+
+// Create public booking (no authentication required)
+router.post('/hostels/:id/bookings', async (req, res) => {
+  const hostelId = Number(req.params.id);
+  if (Number.isNaN(hostelId)) {
+    return res.status(400).json({ success: false, message: 'Invalid hostel id' });
+  }
+
+  const {
+    fullName,
+    email,
+    phone,
+    whatsapp,
+    gender,
+    dateOfBirth,
+    registrationNumber,
+    course,
+    preferredCheckIn,
+    stayDuration,
+    emergencyContact,
+    notes,
+    semesterId,
+    roomId,
+    currency,
+    paymentPhone,
+  } = req.body || {};
+
+  if (!fullName || typeof fullName !== 'string') {
+    return res.status(400).json({ success: false, message: 'Full name is required' });
+  }
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ success: false, message: 'Email is required' });
+  }
+  if (!phone || typeof phone !== 'string') {
+    return res.status(400).json({ success: false, message: 'Phone number is required' });
+  }
+
+  const semesterInt = parseInt(String(semesterId), 10);
+  if (Number.isNaN(semesterInt)) {
+    return res.status(400).json({ success: false, message: 'Semester selection is required' });
+  }
+
+  const roomInt = parseInt(String(roomId), 10);
+  if (Number.isNaN(roomInt)) {
+    return res.status(400).json({ success: false, message: 'Room selection is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const hostelResult = await client.query(
+      `SELECT id, name, booking_fee, price_per_room, university_id
+        FROM hostels
+       WHERE id = $1 AND is_published = TRUE`,
+      [hostelId],
+    );
+
+    if (hostelResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Hostel not found or not published' });
+    }
+
+    const hostel = hostelResult.rows[0];
+
+    const semesterResult = await client.query(
+      `SELECT id, name, academic_year FROM semesters WHERE id = $1 AND hostel_id = $2`,
+      [semesterInt, hostelId],
+    );
+    if (semesterResult.rows.length === 0) {
+      return res.status(400).json({ success: false, message: 'Semester not available for this hostel' });
+    }
+
+    const roomResult = await client.query(
+      `SELECT id, room_number, capacity, price FROM rooms WHERE id = $1 AND hostel_id = $2`,
+      [roomInt, hostelId],
+    );
+    if (roomResult.rows.length === 0) {
+      return res.status(400).json({ success: false, message: 'Room not available for this hostel' });
+    }
+
+    const room = roomResult.rows[0];
+    const roomCapacity = Number(room.capacity ?? 0);
+    const roomPrice = room.price !== null && room.price !== undefined
+      ? Number(room.price)
+      : hostel.price_per_room !== null && hostel.price_per_room !== undefined
+        ? Number(hostel.price_per_room)
+        : Number(hostel.booking_fee ?? 0);
+
+    const bookingFee = Number(hostel.booking_fee ?? 0);
+
+    const normalizedBookingFee = Math.max(0, bookingFee);
+    const amountDue = Math.max(roomPrice, normalizedBookingFee);
+    const amountPaid = Math.min(normalizedBookingFee, amountDue);
+    const outstandingBalance = Math.max(amountDue - amountPaid, 0);
+
+    const occupancyCheck = await client.query(
+      `
+        SELECT
+          $1::INT AS capacity,
+          COALESCE((
+            SELECT COUNT(*) FROM public_hostel_bookings pb
+            WHERE pb.room_id = $2
+              AND pb.semester_id = $3
+              AND pb.status IN ('pending', 'booked', 'checked_in')
+          ), 0) AS pending_bookings,
+          COALESCE((
+            SELECT COUNT(*) FROM student_room_assignments sra
+            WHERE sra.room_id = $2
+              AND sra.status = 'active'
+              AND (sra.semester_id = $3 OR $3 IS NULL)
+          ), 0) AS active_assignments
+      `,
+      [roomCapacity, roomInt, semesterInt],
+    );
+
+    const occupancy = occupancyCheck.rows[0];
+    const occupied = Number(occupancy.pending_bookings ?? 0) + Number(occupancy.active_assignments ?? 0);
+    if (occupied >= roomCapacity) {
+      return res.status(409).json({ success: false, message: 'Selected room is already fully booked' });
+    }
+
+    const reference = `RM-${hostelId}-${Date.now()}`;
+    const verificationCode = generateVerificationCode();
+    const resolvedCurrency =
+      typeof currency === 'string' && currency.trim().length > 0 ? currency.trim().toUpperCase() : 'UGX';
+
+    const parsedCheckIn =
+      typeof preferredCheckIn === 'string' && preferredCheckIn.trim().length > 0
+        ? new Date(preferredCheckIn)
+        : null;
+    const checkInDate = parsedCheckIn && !Number.isNaN(parsedCheckIn.valueOf()) ? parsedCheckIn : null;
+
+    const parsedDob =
+      typeof dateOfBirth === 'string' && dateOfBirth.trim().length > 0
+        ? new Date(dateOfBirth)
+        : null;
+    const dob = parsedDob && !Number.isNaN(parsedDob.valueOf()) ? parsedDob : null;
+
+    const insertQuery = `
+      INSERT INTO public_hostel_bookings (
+        hostel_id,
+        university_id,
+        semester_id,
+        room_id,
+        source,
+        student_name,
+        student_email,
+        student_phone,
+        whatsapp,
+        gender,
+        date_of_birth,
+        registration_number,
+        course,
+        preferred_check_in,
+        stay_duration,
+        emergency_contact,
+        notes,
+        currency,
+        booking_fee,
+        amount_due,
+        amount_paid,
+        payment_phone,
+        payment_reference,
+        payment_status,
+        status,
+        verification_code,
+        verification_issued_at
+      ) VALUES (
+        $1, $2, $3, $4, 'online',
+        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21, $22, 'paid', 'booked', $23, NOW()
+      )
+      RETURNING *
+    `;
+
+    const values = [
+      hostelId,
+      hostel.university_id ?? null,
+      semesterInt,
+      roomInt,
+      fullName.trim(),
+      email.trim(),
+      phone.trim(),
+      whatsapp?.trim() || null,
+      gender?.trim() || null,
+      dob,
+      registrationNumber?.trim() || null,
+      course?.trim() || null,
+      checkInDate,
+      stayDuration?.trim() || null,
+      emergencyContact?.trim() || null,
+      notes?.trim() || null,
+      resolvedCurrency,
+      normalizedBookingFee,
+      amountDue,
+      amountPaid,
+      (paymentPhone || phone).trim(),
+      reference,
+      verificationCode,
+    ];
+
+    const inserted = await client.query(insertQuery, values);
+    const booking = inserted.rows[0];
+
+    const availabilityQuery = `
+      SELECT 
+          COUNT(DISTINCT CASE 
+            WHEN r.id IS NOT NULL 
+            AND (r.status IS NULL OR r.status = 'available')
+            AND (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) > 0
+            THEN r.id
+        END) AS available_rooms
+      FROM rooms r
+        LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS active_count
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id AND sra.status = 'active'
+      ) active_assignments ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS booking_count
+        FROM public_hostel_bookings pb
+        WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+      ) pending_bookings ON TRUE
+      WHERE r.hostel_id = $1
+    `;
+
+    const availabilityResult = await client.query(availabilityQuery, [hostelId]);
+    const availableRooms = Number(availabilityResult.rows[0]?.available_rooms ?? 0);
+
+    const roomAvailability = Math.max(roomCapacity - (occupied + 1), 0);
+
+    await EmailService.sendEmailAsync({
+      to: email.trim(),
+      subject: `Your Booking Confirmation for ${hostel.name}`,
+      html: EmailService.generatePublicBookingConfirmationEmail({
+        studentName: fullName.trim(),
+        studentEmail: email.trim(),
+        studentPhone: phone.trim(),
+        registrationNumber: registrationNumber?.trim() || null,
+        course: course?.trim() || null,
+        semesterName: semesterResult.rows[0]?.name || null,
+        hostelName: hostel.name,
+        verificationCode,
+        bookingReference: reference,
+        bookingFee: normalizedBookingFee,
+        roomPrice: amountDue,
+        outstandingBalance,
+        currency: resolvedCurrency,
+        paymentPhone: (paymentPhone || phone).trim(),
+        roomNumber: room.room_number ?? null,
+        availableSpaces: roomAvailability,
+        availableRooms,
+        portalUrl: process.env.PUBLIC_PORTAL_URL || process.env.FRONTEND_URL || 'http://localhost:3000',
+      }),
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Booking request received and payment marked as received for demonstration purposes.',
+      data: {
+        id: booking.id,
+        booking_fee: Number(booking.booking_fee ?? 0),
+        amount_due: Number(booking.amount_due ?? amountDue),
+        amount_paid: Number(booking.amount_paid ?? amountPaid),
+        outstanding_balance: outstandingBalance,
+        room_price: amountDue,
+        payment_reference: booking.payment_reference,
+        payment_status: booking.payment_status,
+        status: booking.status,
+        created_at: booking.created_at,
+        semester_id: booking.semester_id,
+        room_id: booking.room_id,
+        verification_code: booking.verification_code,
+        available_rooms: availableRooms,
+        room_available_spaces: roomAvailability,
+        room_number: room.room_number ?? null,
+        currency: booking.currency,
+      },
+    });
+  } catch (error) {
+    console.error('Public booking creation error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to submit booking request' });
+  } finally {
+    client.release();
+  }
+});
+
 export default router;
 
 
