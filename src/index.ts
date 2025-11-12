@@ -37,7 +37,9 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
 // Trust proxy - required when behind a reverse proxy/load balancer
-app.set('trust proxy', true);
+// Set to 1 to trust only the first proxy (more secure than true)
+// This prevents IP spoofing while still allowing rate limiting to work correctly
+app.set('trust proxy', 1);
 
 // Security: Helmet
 app.use(helmet({

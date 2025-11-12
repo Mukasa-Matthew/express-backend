@@ -323,13 +323,90 @@ router.get('/hostels/:id', async (req, res) => {
     // Calculate available rooms for the hostel (overriding the static value)
     const availableRoomsCount = parseInt(roomsResult.rows[0]?.available_rooms || '0', 10);
 
+    // Get semesters for this hostel
+    const semestersQuery = `
+      SELECT id, name, academic_year, start_date, end_date, status
+      FROM semesters
+      WHERE hostel_id = $1
+      ORDER BY start_date DESC NULLS LAST, id DESC
+    `;
+    const semestersResult = await pool.query(semestersQuery, [id]);
+
+    // Get rooms with availability for this hostel
+    const bookingsTableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
+    const hasPublicBookingsTable = Boolean(bookingsTableCheck.rows[0]?.table_ref);
+
+    const pendingBookingsJoin = hasPublicBookingsTable
+      ? `
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS booking_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+        ) pending_bookings ON TRUE
+      `
+      : `
+        LEFT JOIN LATERAL (
+          SELECT 0::bigint AS booking_count
+        ) pending_bookings ON TRUE
+      `;
+
+    const roomDescriptionColumnCheck = await pool.query(
+      `SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'rooms'
+          AND column_name = 'description'
+        LIMIT 1`,
+    );
+    const roomDescriptionSelect = roomDescriptionColumnCheck.rowCount ? 'r.description' : 'NULL::text AS description';
+
+    const roomSelfContainedColumnCheck = await pool.query(
+      `SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'rooms'
+          AND column_name = 'self_contained'
+        LIMIT 1`,
+    );
+    const roomSelfContainedSelect = roomSelfContainedColumnCheck.rowCount ? 'r.self_contained' : 'NULL::boolean AS self_contained';
+
+    const roomsListQuery = `
+      SELECT
+        r.id,
+        r.room_number,
+        r.capacity,
+        r.status,
+        r.price,
+        ${roomDescriptionSelect},
+        ${roomSelfContainedSelect},
+        COALESCE(active_assignments.active_count, 0) AS active_occupants,
+        COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
+        COALESCE(active_assignments.active_count, 0) + COALESCE(pending_bookings.booking_count, 0) AS occupied_count,
+        GREATEST(
+          r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0),
+          0
+        ) AS available_spaces
+      FROM rooms r
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS active_count
+          FROM student_room_assignments sra
+          WHERE sra.room_id = r.id AND sra.status = 'active'
+        ) active_assignments ON TRUE
+        ${pendingBookingsJoin}
+      WHERE r.hostel_id = $1
+      ORDER BY r.room_number ASC
+    `;
+    const roomsListResult = await pool.query(roomsListQuery, [id]);
+
     res.json({
       success: true,
       data: {
         ...hostelResult.rows[0],
         available_rooms: availableRoomsCount, // Use dynamically calculated value
         images: imagesResult.rows,
-        room_stats: roomsResult.rows[0] || null
+        room_stats: roomsResult.rows[0] || null,
+        semesters: semestersResult.rows,
+        room_list: roomsListResult.rows
       }
     });
   } catch (error) {
