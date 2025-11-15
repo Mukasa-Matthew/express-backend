@@ -827,7 +827,35 @@ router.delete('/:id', async (req, res) => {
       await client.query('DELETE FROM users WHERE id = $1', [userId]);
     }
 
-    // Delete the hostel (this will CASCADE delete custodians, rooms, subscriptions, etc.)
+    // Before deleting the hostel, we need to handle semesters that are referenced by payments
+    // Get all semesters for this hostel
+    const semestersResult = await client.query(
+      'SELECT id FROM semesters WHERE hostel_id = $1',
+      [id]
+    );
+    const semesterIds = semestersResult.rows.map((row) => Number(row.id));
+
+    // Set semester_id to NULL in payments that reference these semesters
+    // This prevents foreign key constraint violations when semesters are deleted
+    if (semesterIds.length > 0) {
+      // Check if semester_id column exists in payments table
+      const columnCheck = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = 'payments' 
+        AND column_name = 'semester_id'
+      `);
+      
+      if (columnCheck.rows.length > 0) {
+        await client.query(
+          `UPDATE payments SET semester_id = NULL WHERE semester_id = ANY($1::int[])`,
+          [semesterIds]
+        );
+      }
+    }
+
+    // Delete the hostel (this will CASCADE delete custodians, rooms, subscriptions, semesters, etc.)
     await client.query('DELETE FROM hostels WHERE id = $1', [id]);
 
     await client.query('COMMIT');
