@@ -11,6 +11,7 @@ export interface User {
   role: 'super_admin' | 'hostel_admin' | 'tenant' | 'user' | 'custodian';
   hostel_id?: number | null;
   profile_picture?: string | null;
+  password_is_temp?: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -35,6 +36,7 @@ function prismaUserToUser(prismaUser: PrismaUser): User {
     role: prismaUser.role as User['role'],
     hostel_id: prismaUser.hostelId,
     profile_picture: prismaUser.profilePicture,
+    password_is_temp: (prismaUser as any).passwordIsTemp || false,
     created_at: prismaUser.createdAt,
     updated_at: prismaUser.updatedAt,
   };
@@ -59,6 +61,19 @@ export class UserModel {
   }
 
   static async findByEmail(email: string): Promise<User | null> {
+    const prismaUser = await prisma.user.findFirst({
+      where: {
+        email: {
+          equals: email,
+          mode: 'insensitive',
+        },
+      },
+    });
+    
+    return prismaUser ? prismaUserToUser(prismaUser) : null;
+  }
+
+  static async findByEmailWithPassword(email: string): Promise<User | null> {
     const prismaUser = await prisma.user.findFirst({
       where: {
         email: {

@@ -99,12 +99,35 @@ router.post('/login', async (req, res) => {
       if (!ok) return res.status(400).json({ success: false, message: 'Captcha verification failed' });
     }
 
-    const userByEmail = await UserModel.findByEmail(identifier);
-    const user = userByEmail || await UserModel.findByUsername(identifier);
-    if (!user) {
+    // Need to get user with password and password_is_temp field
+    const userByEmail = await pool.query(
+      'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(email) = LOWER($1)',
+      [identifier]
+    );
+    const userByUsername = userByEmail.rows.length === 0 
+      ? await pool.query(
+          'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(username) = LOWER($1)',
+          [identifier]
+        )
+      : { rows: [] };
+    
+    const userRow = userByEmail.rows[0] || userByUsername.rows[0];
+    if (!userRow) {
       console.log(`[Login] User not found for identifier: ${identifier}`);
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
+    
+    const user = {
+      id: userRow.id,
+      email: userRow.email,
+      username: userRow.username,
+      name: userRow.name,
+      password: userRow.password,
+      role: userRow.role,
+      hostel_id: userRow.hostel_id,
+      password_is_temp: userRow.password_is_temp || false,
+      profile_picture: userRow.profile_picture || null,
+    };
 
     if (!user.password) {
       console.error(`[Login] User ${user.id} (${user.email || user.username}) has no password set`);
@@ -199,8 +222,24 @@ router.post('/login', async (req, res) => {
       }
     }
 
+    // Generate token (needed for both normal login and temporary password cases)
     const token = jwt.sign({ userId: user.id, role: user.role, hostel_id: hostelId || null }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '12h' });
 
+    // Check if password is temporary - enforce password change on first login
+    const passwordIsTemp = user.password_is_temp || false;
+    if (passwordIsTemp) {
+      // Return response with token so user can change password, but flag that password change is required
+      return res.status(200).json({
+        success: true,
+        token, // Include token so user can authenticate and change password
+        requiresPasswordChange: true,
+        message: 'Please change your temporary password to continue',
+        code: 'PASSWORD_CHANGE_REQUIRED',
+        user: { id: user.id, email: user.email, name: user.name, role: user.role, hostel_id: hostelId || null, profile_picture: user.profile_picture },
+      });
+    }
+
+    // Normal login response
     res.json({ success: true, token, user: { id: user.id, email: user.email, name: user.name, role: user.role, hostel_id: hostelId || null, profile_picture: user.profile_picture },
       warning: subscriptionWarningDays !== null ? { type: 'subscription_expiring', daysLeft: subscriptionWarningDays } : undefined
     });
@@ -312,7 +351,7 @@ router.post('/logout', (req, res) => {
 // Change password
 router.post('/change-password', async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, isTemporaryPassword } = req.body;
     const token = req.headers.authorization?.replace('Bearer ', '');
     
     if (!token) {
@@ -333,13 +372,30 @@ router.post('/change-password', async (req, res) => {
       });
     }
 
-    // Verify current password
-    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
-    if (!isCurrentPasswordValid) {
-      return res.status(400).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
+    // Check if user has temporary password
+    const userWithTempCheck = await pool.query(
+      'SELECT password_is_temp FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+    const hasTemporaryPassword = userWithTempCheck.rows[0]?.password_is_temp || false;
+
+    // If changing from temporary password, skip current password verification
+    if (!hasTemporaryPassword && !isTemporaryPassword) {
+      // Verify current password for permanent passwords
+      if (!currentPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is required'
+        });
+      }
+
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isCurrentPasswordValid) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is incorrect'
+        });
+      }
     }
 
     // Hash new password
@@ -375,6 +431,14 @@ router.post('/change-password', async (req, res) => {
 
     // Mark password as permanent and clear any stored temporary credentials
     await pool.query('UPDATE users SET password_is_temp = FALSE WHERE id = $1', [decoded.userId]);
+    
+    // Log password change
+    const { AuditLogger } = require('../utils/auditLogger');
+    await AuditLogger.logPasswordChange(
+      decoded.userId,
+      req.ip,
+      req.get('user-agent') || undefined
+    );
     if (user.role === 'custodian') {
       try {
         await pool.query(`ALTER TABLE custodians ADD COLUMN IF NOT EXISTS original_username TEXT`);

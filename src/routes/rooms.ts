@@ -140,10 +140,17 @@ router.get('/available', async (req, res) => {
           (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) AS available_spaces
         FROM rooms r
         LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS active_count
+          SELECT COUNT(DISTINCT sra.user_id) AS active_count
           FROM student_room_assignments sra
+          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
           WHERE sra.room_id = r.id
             AND sra.status = 'active'
+            AND se.balance IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM payments p 
+              WHERE p.user_id = sra.user_id 
+              AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
+            )
             ${assignmentsSemesterFilter}
         ) active_assignments ON true
         ${pendingBookingsJoin}
@@ -173,12 +180,17 @@ router.post('/', async (req: Request, res) => {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
 
-    const { room_number, price, description, self_contained, capacity } = req.body as any;
+    const { room_number, price, description, self_contained, capacity, gender_allowed, floor } = req.body as any;
     if (!room_number || price === undefined) {
       return res.status(400).json({ success: false, message: 'room_number and price are required' });
     }
     // Validate capacity is between 1 and 4
     const roomCapacity = capacity && capacity >= 1 && capacity <= 4 ? parseInt(capacity) : 1;
+    // Validate gender_allowed
+    const genderAllowed = gender_allowed && ['male', 'female', 'both'].includes(gender_allowed) 
+      ? gender_allowed 
+      : 'both';
+    
     const columnCheck = await pool.query(`
       SELECT column_name
       FROM information_schema.columns
@@ -188,11 +200,18 @@ router.post('/', async (req: Request, res) => {
     const hasDescription = columns.includes('description');
     const hasSelfContained = columns.includes('self_contained');
     const hasStatus = columns.includes('status');
+    const hasGenderAllowed = columns.includes('gender_allowed');
 
     const insertColumns = ['hostel_id', 'room_number', 'price', 'capacity'];
     const placeholders = ['$1', '$2', '$3', '$4'];
     const values: any[] = [currentUser.hostel_id, room_number, price, roomCapacity];
     let paramIndex = 5;
+
+    if (hasGenderAllowed) {
+      insertColumns.push('gender_allowed');
+      placeholders.push(`$${paramIndex++}`);
+      values.push(genderAllowed);
+    }
 
     if (columns.includes('floor')) {
       insertColumns.push('floor');
@@ -239,6 +258,19 @@ router.post('/', async (req: Request, res) => {
       placeholders.push('NOW()');
     }
 
+    // Check if room with same number already exists for this hostel
+    const existingRoom = await pool.query(
+      'SELECT id, room_number FROM rooms WHERE hostel_id = $1 AND room_number = $2',
+      [currentUser.hostel_id, room_number]
+    );
+    
+    if (existingRoom.rows.length > 0) {
+      return res.status(409).json({ 
+        success: false, 
+        message: `A room with number "${room_number}" already exists in this hostel. Please use a different room number.` 
+      });
+    }
+
     const insertQuery = `
       INSERT INTO rooms (${insertColumns.join(', ')})
       VALUES (${placeholders.join(', ')})
@@ -246,8 +278,18 @@ router.post('/', async (req: Request, res) => {
 
     const result = await pool.query(insertQuery, values);
     res.status(201).json({ success: true, data: result.rows[0] });
-  } catch (e) {
+  } catch (e: any) {
     console.error('Create room error:', e);
+    
+    // Handle duplicate key constraint violation
+    if (e.code === '23505' && e.constraint === 'rooms_hostel_id_room_number_key') {
+      const roomNumber = (req.body as any)?.room_number || 'this number';
+      return res.status(409).json({ 
+        success: false, 
+        message: `A room with number "${roomNumber}" already exists in this hostel. Please use a different room number.` 
+      });
+    }
+    
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -271,10 +313,19 @@ router.put('/:id', async (req: Request, res) => {
     // If marking as available, check current capacity - allow if not full
     if (status === 'available') {
       const active = await pool.query(
-        `SELECT r.capacity, COALESCE(COUNT(sra.id), 0) as current_occupants
+        `SELECT r.capacity, COALESCE(COUNT(DISTINCT sra.user_id), 0) as current_occupants
          FROM rooms r
          LEFT JOIN student_room_assignments sra ON r.id = sra.room_id AND sra.status = 'active'
+         LEFT JOIN semester_enrollments se ON se.user_id = sra.user_id
          WHERE r.id = $1
+           AND (sra.user_id IS NULL OR (
+             se.balance IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM payments p 
+               WHERE p.user_id = sra.user_id 
+               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
+             )
+           ))
          GROUP BY r.id, r.capacity`,
         [id]
       );

@@ -87,9 +87,17 @@ router.get('/hostels', async (req, res) => {
         FROM hostels h
         LEFT JOIN rooms r ON r.hostel_id = h.id
         LEFT JOIN LATERAL (
-          SELECT COUNT(*) as current_occupants
+          SELECT COUNT(DISTINCT sra.user_id) as current_occupants
           FROM student_room_assignments sra
-          WHERE sra.room_id = r.id AND sra.status = 'active'
+          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          WHERE sra.room_id = r.id 
+            AND sra.status = 'active'
+            AND se.balance IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM payments p 
+              WHERE p.user_id = sra.user_id 
+              AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
+            )
         ) occupant_count ON true
         GROUP BY h.id
       )
@@ -389,9 +397,17 @@ router.get('/hostels/:id', async (req, res) => {
         ) AS available_spaces
       FROM rooms r
         LEFT JOIN LATERAL (
-          SELECT COUNT(*) AS active_count
+          SELECT COUNT(DISTINCT sra.user_id) AS active_count
           FROM student_room_assignments sra
-          WHERE sra.room_id = r.id AND sra.status = 'active'
+          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          WHERE sra.room_id = r.id 
+            AND sra.status = 'active'
+            AND se.balance IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM payments p 
+              WHERE p.user_id = sra.user_id 
+              AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
+            )
         ) active_assignments ON TRUE
         ${pendingBookingsJoin}
       WHERE r.hostel_id = $1
@@ -1055,10 +1071,18 @@ router.post('/hostels/:id/bookings', async (req, res) => {
         END) AS available_rooms
       FROM rooms r
         LEFT JOIN LATERAL (
-        SELECT COUNT(*) AS active_count
+          SELECT COUNT(DISTINCT sra.user_id) AS active_count
           FROM student_room_assignments sra
-          WHERE sra.room_id = r.id AND sra.status = 'active'
-      ) active_assignments ON TRUE
+          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          WHERE sra.room_id = r.id 
+            AND sra.status = 'active'
+            AND se.balance IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM payments p 
+              WHERE p.user_id = sra.user_id 
+              AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
+            )
+        ) active_assignments ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS booking_count
         FROM public_hostel_bookings pb
@@ -1072,6 +1096,7 @@ router.post('/hostels/:id/bookings', async (req, res) => {
 
     const roomAvailability = Math.max(roomCapacity - (occupied + 1), 0);
 
+    // Send confirmation email to student
     await EmailService.sendEmailAsync({
       to: email.trim(),
       subject: `Your Booking Confirmation for ${hostel.name}`,
@@ -1096,6 +1121,62 @@ router.post('/hostels/:id/bookings', async (req, res) => {
         portalUrl: process.env.PUBLIC_PORTAL_URL || process.env.FRONTEND_URL || 'http://localhost:3000',
       }),
     });
+
+    // Notify hostel admin and custodians about new booking
+    try {
+      // Get all hostel admins
+      const adminsResult = await client.query(
+        `SELECT u.email, u.name, 'hostel_admin' as role
+         FROM users u 
+         WHERE u.hostel_id = $1 AND u.role = 'hostel_admin'`,
+        [hostelId]
+      );
+
+      // Get all custodians for this hostel
+      const custodiansResult = await client.query(
+        `SELECT u.email, u.name, 'custodian' as role
+         FROM custodians c
+         JOIN users u ON u.id = c.user_id
+         WHERE c.hostel_id = $1`,
+        [hostelId]
+      );
+
+      // Combine admins and custodians
+      const allUsers = [...adminsResult.rows, ...custodiansResult.rows];
+
+      if (allUsers.length > 0) {
+        for (const user of allUsers) {
+          if (user.email) {
+            await EmailService.sendEmailAsync({
+              to: user.email,
+              subject: `New Booking Received - ${hostel.name}`,
+              html: EmailService.generateAdminBookingNotificationEmail({
+                adminName: user.name || (user.role === 'custodian' ? 'Custodian' : 'Admin'),
+                hostelName: hostel.name,
+                studentName: fullName.trim(),
+                studentEmail: email.trim(),
+                studentPhone: phone.trim(),
+                registrationNumber: registrationNumber?.trim() || null,
+                course: course?.trim() || null,
+                semesterName: semesterResult.rows[0]?.name || null,
+                roomNumber: room.room_number ?? null,
+                bookingFee: normalizedBookingFee,
+                amountDue,
+                currency: resolvedCurrency,
+                verificationCode,
+                bookingReference: reference,
+                bookingId: booking.id,
+                portalUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
+              }),
+            });
+          }
+        }
+        console.log(`📧 Sent booking notifications to ${allUsers.length} admin(s) and custodian(s)`);
+      }
+    } catch (emailError) {
+      // Log but don't fail the booking if notification fails
+      console.error('Failed to send booking notification emails:', emailError);
+    }
 
     return res.status(201).json({
       success: true,

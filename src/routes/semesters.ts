@@ -211,12 +211,16 @@ router.delete('/global/:id', async (req, res) => {
 
 // ========== HOSTEL SEMESTER ROUTES ==========
 
-// Create a new semester for a hostel (Hostel Admin or Super Admin)
+// Create a new semester for a hostel (Only Custodians or Super Admin)
 router.post('/', async (req, res) => {
   try {
     const decoded = verifyToken(req);
-    if (!decoded || (decoded.role !== 'super_admin' && decoded.role !== 'hostel_admin' && decoded.role !== 'custodian')) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+    // Only custodians and super_admin can create semesters (hostel_admin should not create semesters)
+    if (!decoded || (decoded.role !== 'super_admin' && decoded.role !== 'custodian')) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can create semesters. Hostel administrators can view semesters and reports.' 
+      });
     }
 
     const { global_semester_id, name, academic_year, start_date, end_date } = req.body;

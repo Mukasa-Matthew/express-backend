@@ -2156,5 +2156,265 @@ export class EmailService {
       </html>
     `;
   }
+
+  static generateAdminBookingNotificationEmail({
+    adminName,
+    hostelName,
+    studentName,
+    studentEmail,
+    studentPhone,
+    registrationNumber,
+    course,
+    semesterName,
+    roomNumber,
+    bookingFee,
+    amountDue,
+    currency,
+    verificationCode,
+    bookingReference,
+    bookingId,
+    portalUrl,
+  }: {
+    adminName: string;
+    hostelName: string;
+    studentName: string;
+    studentEmail?: string | null;
+    studentPhone?: string | null;
+    registrationNumber?: string | null;
+    course?: string | null;
+    semesterName?: string | null;
+    roomNumber?: string | null;
+    bookingFee: number;
+    amountDue: number;
+    currency: string;
+    verificationCode: string;
+    bookingReference: string;
+    bookingId: number;
+    portalUrl?: string;
+  }): string {
+    const formattedFee = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(bookingFee);
+
+    const formattedAmountDue = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(amountDue);
+
+    const bookingUrl = `${portalUrl || 'http://localhost:3000'}/hostel-admin/bookings`;
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Booking Received - ${hostelName}</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #f0f4ff;
+            color: #1f2937;
+            margin: 0;
+            padding: 0;
+          }
+          .wrapper {
+            max-width: 640px;
+            margin: 0 auto;
+            padding: 24px;
+          }
+          .card {
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 18px 40px rgba(30, 64, 175, 0.1);
+            overflow: hidden;
+          }
+          .hero {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 36px 32px;
+            text-align: center;
+          }
+          .hero h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+          }
+          .content {
+            padding: 32px;
+          }
+          .alert-box {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 16px;
+            border-radius: 8px;
+            margin: 18px 0;
+          }
+          .info-box {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 18px 0;
+            border: 1px solid #e5e7eb;
+          }
+          .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+          }
+          .info-row:last-child {
+            border-bottom: none;
+          }
+          .info-label {
+            font-weight: 600;
+            color: #4b5563;
+          }
+          .info-value {
+            font-weight: 600;
+            color: #111827;
+            text-align: right;
+          }
+          .code-box {
+            background: #eff6ff;
+            border: 1px dashed #2563eb;
+            padding: 16px;
+            border-radius: 12px;
+            text-align: center;
+            margin: 18px 0;
+          }
+          .code-box span {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: 6px;
+            color: #1d4ed8;
+          }
+          .button {
+            display: inline-block;
+            background: #2563eb;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            margin: 18px 0;
+          }
+          .footer {
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+            margin-top: 24px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="wrapper">
+          <div class="card">
+            <div class="hero">
+              <h1>📋 New Booking Received</h1>
+            </div>
+            <div class="content">
+              <p>Hello ${adminName},</p>
+              
+              <p>A new booking has been received for <strong>${hostelName}</strong>.</p>
+
+              <div class="alert-box">
+                <strong>Action Required:</strong> Please review and process this booking in your admin dashboard.
+              </div>
+
+              <div class="info-box">
+                <h3 style="margin-top: 0;">Booking Details</h3>
+                <div class="info-row">
+                  <span class="info-label">Booking ID:</span>
+                  <span class="info-value">#${bookingId}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Reference:</span>
+                  <span class="info-value">${bookingReference}</span>
+                </div>
+                ${semesterName ? `
+                <div class="info-row">
+                  <span class="info-label">Semester:</span>
+                  <span class="info-value">${semesterName}</span>
+                </div>
+                ` : ''}
+                ${roomNumber ? `
+                <div class="info-row">
+                  <span class="info-label">Room:</span>
+                  <span class="info-value">${roomNumber}</span>
+                </div>
+                ` : ''}
+                <div class="info-row">
+                  <span class="info-label">Booking Fee:</span>
+                  <span class="info-value">${formattedFee}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Total Amount Due:</span>
+                  <span class="info-value">${formattedAmountDue}</span>
+                </div>
+              </div>
+
+              <div class="info-box">
+                <h3 style="margin-top: 0;">Student Information</h3>
+                <div class="info-row">
+                  <span class="info-label">Name:</span>
+                  <span class="info-value">${studentName}</span>
+                </div>
+                ${studentEmail ? `
+                <div class="info-row">
+                  <span class="info-label">Email:</span>
+                  <span class="info-value">${studentEmail}</span>
+                </div>
+                ` : ''}
+                ${studentPhone ? `
+                <div class="info-row">
+                  <span class="info-label">Phone:</span>
+                  <span class="info-value">${studentPhone}</span>
+                </div>
+                ` : ''}
+                ${registrationNumber ? `
+                <div class="info-row">
+                  <span class="info-label">Registration #:</span>
+                  <span class="info-value">${registrationNumber}</span>
+                </div>
+                ` : ''}
+                ${course ? `
+                <div class="info-row">
+                  <span class="info-label">Course:</span>
+                  <span class="info-value">${course}</span>
+                </div>
+                ` : ''}
+              </div>
+
+              <div class="code-box">
+                <p style="margin: 0 0 8px 0; font-weight: 600;">Verification Code:</p>
+                <span>${verificationCode}</span>
+              </div>
+
+              <div style="text-align: center;">
+                <a href="${bookingUrl}" class="button">View Booking in Dashboard</a>
+              </div>
+
+              <p style="margin-top: 24px;">
+                You can view and manage this booking from your admin dashboard. 
+                The student will need to provide the verification code when checking in.
+              </p>
+            </div>
+            <div class="footer">
+              <p>This is an automated notification from LTS Portal.</p>
+              <p>© ${new Date().getFullYear()} LTS Portal. All rights reserved.</p>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
 }
 

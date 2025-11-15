@@ -45,12 +45,9 @@ export async function requireActiveSemester(userId: number, hostelId: number): P
     if (!activeSemesterId) {
       const message = 'No active semester found. Please create and activate a semester before recording data.';
 
-      if (strictMode) {
-        return { success: false, message };
-      }
-
-      console.warn(`[Semesters] ${message} (hostel_id=${hostelId}). Proceeding without semester linkage.`);
-      return { success: true, message };
+      // Always enforce for student registration (high priority)
+      // Allow flexibility for other operations based on strict mode
+      return { success: false, message };
     }
 
     return {

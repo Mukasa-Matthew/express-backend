@@ -277,194 +277,88 @@ async function performBookingCheckIn(
     };
   }
 
-  // Create or find user account
-  const existingUserRes = await client.query('SELECT * FROM users WHERE email = $1', [student_email]);
-  let userId: number;
-
-  if (existingUserRes.rows.length > 0) {
-    const existingUser = existingUserRes.rows[0];
-    // Verify user is a student role
-    if (existingUser.role !== 'user') {
+  // Use unified student registration service for check-in
+  // Get booking amount paid for initial payment
+  const bookingAmountPaid = parseFloat(bookingRow.amount_paid || '0');
+  
+  // Ensure we have a semester_id - if booking doesn't have one, get current semester
+  let finalSemesterId = semester_id;
+  if (!finalSemesterId) {
+    const currentSemesterRes = await client.query(
+      `SELECT id FROM semesters 
+       WHERE hostel_id = $1 AND is_current = true AND status = 'active'
+       LIMIT 1`,
+      [allowedHostelId]
+    );
+    if (currentSemesterRes.rows.length > 0) {
+      finalSemesterId = currentSemesterRes.rows[0].id;
+    } else {
       return {
         status: 400,
         success: false,
-        message: 'Email already exists for a non-student account',
+        message: 'No active semester found. Please create and activate a semester before checking in students.',
       };
     }
-    // Update hostel_id if needed
-    if (!existingUser.hostel_id || existingUser.hostel_id !== allowedHostelId) {
-      await client.query('UPDATE users SET hostel_id = $1 WHERE id = $2', [allowedHostelId, existingUser.id]);
-    }
-    // Update name if different
-    if (student_name && student_name !== existingUser.name) {
-      await client.query('UPDATE users SET name = $1 WHERE id = $2', [student_name, existingUser.id]);
-    }
-    userId = existingUser.id;
-  } else {
-    // Create new user account
-    const randomPassword = CredentialGenerator.generatePatternPassword();
-    const hashedPassword = await bcrypt.hash(randomPassword, 10);
-    const newUserRes = await client.query(
-      `INSERT INTO users (email, name, password, role, hostel_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 'user', $4, NOW(), NOW()) RETURNING id`,
-      [student_email, student_name, hashedPassword, allowedHostelId],
+  }
+  
+  const { StudentRegistrationService } = require('../utils/studentRegistration');
+  
+  try {
+    const registrationResult = await StudentRegistrationService.registerStudent(
+      {
+        name: student_name,
+        email: student_email,
+        phone: student_phone || null,
+        gender: gender || null,
+        dateOfBirth: date_of_birth || null,
+        registrationNumber: registration_number || null,
+        course: course || null,
+        emergencyContact: emergency_contact || null,
+        hostelId: allowedHostelId,
+        roomId: room_id,
+        semesterId: finalSemesterId,
+        initialPaymentAmount: bookingAmountPaid > 0 ? bookingAmountPaid : 0,
+        currency: 'UGX',
+      },
+      currentUser.id,
+      client
     );
-    userId = newUserRes.rows[0].id;
+
+    const userId = registrationResult.userId;
+
+    // Update room occupancy after assignment
+    await StudentRegistrationService.updateRoomOccupancy(client, room_id);
+
+    // Update booking status to checked_in
+    const updateRes = await client.query(
+      `
+        UPDATE public_hostel_bookings
+        SET status = 'checked_in',
+            payment_status = CASE
+              WHEN payment_status = 'paid' THEN payment_status
+              ELSE 'paid'
+            END,
+            confirmed_at = COALESCE(confirmed_at, NOW()),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `,
+      [bookingId],
+    );
+
+    return {
+      status: 200,
+      success: true,
+      message: 'Booking checked in successfully and student account created',
+      booking: updateRes.rows[0],
+    };
+  } catch (registrationError: any) {
+    return {
+      status: 400,
+      success: false,
+      message: registrationError.message || 'Failed to register student during check-in',
+    };
   }
-
-  // Create or update student profile
-  const profileTableCheck = await client.query(`
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_name IN ('student_profiles', 'students')
-  `);
-  const hasStudentProfilesTable = profileTableCheck.rows.some((row: any) => row.table_name === 'student_profiles');
-  const hasStudentsTable = profileTableCheck.rows.some((row: any) => row.table_name === 'students');
-
-  if (hasStudentProfilesTable) {
-    const profileExists = await client.query('SELECT user_id FROM student_profiles WHERE user_id = $1', [userId]);
-    if (profileExists.rowCount === 0) {
-      await client.query(
-        `INSERT INTO student_profiles (user_id, gender, date_of_birth, phone, whatsapp, emergency_contact)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [userId, gender || null, date_of_birth || null, student_phone || null, whatsapp || null, emergency_contact || null],
-      );
-    } else {
-      await client.query(
-        `UPDATE student_profiles 
-         SET gender = COALESCE($2, gender), date_of_birth = COALESCE($3, date_of_birth),
-             phone = COALESCE($4, phone), whatsapp = COALESCE($5, whatsapp),
-             emergency_contact = COALESCE($6, emergency_contact), updated_at = NOW()
-         WHERE user_id = $1`,
-        [userId, gender || null, date_of_birth || null, student_phone || null, whatsapp || null, emergency_contact || null],
-      );
-    }
-  } else if (hasStudentsTable) {
-    const studentExists = await client.query('SELECT user_id FROM students WHERE user_id = $1', [userId]);
-    if (studentExists.rowCount === 0) {
-      await client.query(
-        `INSERT INTO students (user_id, registration_number, course, phone_number, emergency_contact, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
-        [userId, registration_number || `REG-${userId}`, course || null, student_phone || null, emergency_contact || null],
-      );
-    } else {
-      await client.query(
-        `UPDATE students 
-         SET registration_number = COALESCE($2, registration_number),
-             course = COALESCE($3, course),
-             phone_number = COALESCE($4, phone_number),
-             emergency_contact = COALESCE($5, emergency_contact),
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [userId, registration_number || null, course || null, student_phone || null, emergency_contact || null],
-      );
-    }
-  }
-
-  // Create student room assignment
-  const assignmentColumnsRes = await client.query(`
-    SELECT column_name 
-    FROM information_schema.columns 
-    WHERE table_schema = 'public' AND table_name = 'student_room_assignments'
-  `);
-  const assignmentColumns = new Set<string>(assignmentColumnsRes.rows.map((row: any) => row.column_name));
-  const assignmentUserIdColumn = assignmentColumns.has('student_id')
-    ? 'student_id'
-    : assignmentColumns.has('user_id')
-    ? 'user_id'
-    : null;
-
-  if (assignmentUserIdColumn) {
-    // Check if assignment already exists for this semester
-    const existingAssignmentQuery = semester_id
-      ? `SELECT id FROM student_room_assignments 
-         WHERE ${assignmentUserIdColumn} = $1 
-           AND semester_id = $2 
-           AND status = 'active'`
-      : `SELECT id FROM student_room_assignments 
-         WHERE ${assignmentUserIdColumn} = $1 
-           AND status = 'active'`;
-    const existingAssignmentParams = semester_id ? [userId, semester_id] : [userId];
-    const existingAssignment = await client.query(existingAssignmentQuery, existingAssignmentParams);
-
-    if (existingAssignment.rowCount === 0) {
-      // Create new room assignment
-      const assignmentColumnsToInsert = [assignmentUserIdColumn, 'room_id'];
-      const assignmentValues = [userId, room_id];
-      const assignmentPlaceholders = ['$1', '$2'];
-      let paramIndex = 3;
-
-      if (semester_id && assignmentColumns.has('semester_id')) {
-        assignmentColumnsToInsert.push('semester_id');
-        assignmentValues.push(semester_id);
-        assignmentPlaceholders.push(`$${paramIndex++}`);
-      }
-
-      if (assignmentColumns.has('status')) {
-        assignmentColumnsToInsert.push('status');
-        assignmentValues.push('active');
-        assignmentPlaceholders.push(`$${paramIndex++}`);
-      }
-
-      if (assignmentColumns.has('assigned_by')) {
-        assignmentColumnsToInsert.push('assigned_by');
-        assignmentValues.push(currentUser.id);
-        assignmentPlaceholders.push(`$${paramIndex++}`);
-      }
-
-      if (assignmentColumns.has('created_at')) {
-        assignmentColumnsToInsert.push('created_at');
-        assignmentValues.push(new Date());
-        assignmentPlaceholders.push(`$${paramIndex++}`);
-      }
-
-      if (assignmentColumns.has('updated_at')) {
-        assignmentColumnsToInsert.push('updated_at');
-        assignmentValues.push(new Date());
-        assignmentPlaceholders.push(`$${paramIndex++}`);
-      }
-
-      await client.query(
-        `INSERT INTO student_room_assignments (${assignmentColumnsToInsert.join(', ')})
-         VALUES (${assignmentPlaceholders.join(', ')})`,
-        assignmentValues,
-      );
-    } else {
-      // Update existing assignment to new room
-      await client.query(
-        `UPDATE student_room_assignments 
-         SET room_id = $1, updated_at = NOW()
-         WHERE ${assignmentUserIdColumn} = $2 
-           AND status = 'active'`,
-        [room_id, userId],
-      );
-    }
-  }
-
-  // Update booking status to checked_in
-  const updateRes = await client.query(
-    `
-      UPDATE public_hostel_bookings
-      SET status = 'checked_in',
-          payment_status = CASE
-            WHEN payment_status = 'paid' THEN payment_status
-            ELSE 'paid'
-          END,
-          confirmed_at = COALESCE(confirmed_at, NOW()),
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING *
-    `,
-    [bookingId],
-  );
-
-  return {
-    status: 200,
-    success: true,
-    message: 'Booking checked in successfully and student account created',
-    booking: updateRes.rows[0],
-  };
 }
 
 router.post('/', async (req, res) => {
@@ -473,6 +367,14 @@ router.post('/', async (req, res) => {
     const currentUser = await authenticateRequest(req);
     if (!currentUser) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Only custodians can create bookings (hostel_admin should not create bookings)
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can create bookings. Hostel administrators can view bookings and reports.' 
+      });
     }
 
     const bodyHostelId = req.body.hostelId ? parseInt(String(req.body.hostelId), 10) : null;
@@ -652,7 +554,7 @@ router.post('/', async (req, res) => {
         hostel.university_id ?? null,
         semesterInt,
         roomInt,
-        currentUser.role === 'hostel_admin' ? 'admin' : currentUser.role,
+        'on_site', // Source is 'on_site' for bookings created by custodians
         currentUser.id,
         fullName.trim(),
         email.trim(),
@@ -1153,6 +1055,14 @@ router.post('/:id/payments', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
+    // Only custodians can record payments for bookings
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can record payments. Hostel administrators can view bookings and reports.' 
+      });
+    }
+
     const bookingId = parseInt(req.params.id, 10);
     if (Number.isNaN(bookingId)) {
       return res.status(400).json({ success: false, message: 'Invalid booking id' });
@@ -1264,6 +1174,66 @@ router.post('/:id/payments', async (req, res) => {
         [bookingId, generatedCode],
       );
       updatedBooking = codeUpdate.rows[0];
+    }
+
+    // Auto-register student when payment is added (especially when balance is cleared)
+    // This ensures student appears on students page with room number
+    // Only register if booking has room and semester assigned
+    if (updatedBooking.room_id && updatedBooking.semester_id && updatedBooking.student_email) {
+      try {
+        const { StudentRegistrationService } = require('../utils/studentRegistration');
+        
+        // Use booking's amount_due as total amount (not room price)
+        const bookingTotalAmount = parseFloat(updatedBooking.amount_due || '0');
+        const bookingAmountPaid = parseFloat(updatedBooking.amount_paid || '0');
+        
+        // Register student with the booking amounts
+        const registrationResult = await StudentRegistrationService.registerStudent(
+          {
+            name: updatedBooking.student_name,
+            email: updatedBooking.student_email,
+            phone: updatedBooking.student_phone || null,
+            gender: updatedBooking.gender || null,
+            dateOfBirth: updatedBooking.date_of_birth || null,
+            registrationNumber: updatedBooking.registration_number || null,
+            course: updatedBooking.course || null,
+            emergencyContact: updatedBooking.emergency_contact || null,
+            hostelId: bookingRow.hostel_id,
+            roomId: updatedBooking.room_id,
+            semesterId: updatedBooking.semester_id,
+            initialPaymentAmount: bookingAmountPaid, // Use total amount paid from booking
+            currency: updatedBooking.currency || 'UGX',
+          },
+          currentUser.id,
+          client
+        );
+        
+        // Update semester enrollment to use booking's amount_due as total_amount
+        // This ensures the balance is calculated correctly based on booking, not room price
+        if (bookingTotalAmount > 0) {
+          await client.query(
+            `UPDATE semester_enrollments
+             SET total_amount = $1::numeric,
+                 amount_paid = $2::numeric,
+                 balance = GREATEST(0, ($1::numeric - $2::numeric)),
+                 updated_at = NOW()
+             WHERE user_id = $3 AND semester_id = $4`,
+            [
+              bookingTotalAmount,
+              bookingAmountPaid,
+              registrationResult.userId,
+              updatedBooking.semester_id
+            ]
+          );
+        }
+        
+        // Update room occupancy after registration
+        await StudentRegistrationService.updateRoomOccupancy(client, updatedBooking.room_id);
+      } catch (registrationError: any) {
+        // Log error but don't fail the payment - student might already be registered
+        // The registerStudent function handles existing students gracefully
+        console.error('Auto-registration error (non-fatal):', registrationError.message);
+      }
     }
 
     await client.query('COMMIT');
@@ -1401,8 +1371,22 @@ router.post('/check-in', async (req, res) => {
   }
 });
 
+// Verify booking code (only custodians can verify)
 router.get('/verify/:code', async (req, res) => {
   try {
+    const currentUser = await authenticateRequest(req);
+    if (!currentUser) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Only custodians can verify booking codes
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can verify booking codes. Hostel administrators can view bookings and reports.' 
+      });
+    }
+
     const code = (req.params.code || '').trim().toUpperCase();
     if (!code) {
       return res.status(400).json({ success: false, message: 'Verification code is required' });

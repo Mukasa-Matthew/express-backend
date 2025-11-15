@@ -137,6 +137,7 @@ model Room {
   price           Decimal   @db.Decimal(10, 2)
   amenities       String?   @db.Text
   status          String    @default("available") @db.VarChar(50)
+  genderAllowed   String    @default("both") @map("gender_allowed") @db.VarChar(20)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
   

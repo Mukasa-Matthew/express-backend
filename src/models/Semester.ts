@@ -521,5 +521,52 @@ export class SemesterEnrollmentModel {
     );
     return (result.rowCount || 0) > 0;
   }
+
+  /**
+   * Get semester enrollment summary for a hostel
+   * Returns summary statistics grouped by semester
+   */
+  static async getSemesterSummary(hostelId: number): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT 
+        s.id as semester_id,
+        s.name as semester_name,
+        s.academic_year,
+        s.start_date,
+        s.end_date,
+        s.status as semester_status,
+        s.is_current,
+        COUNT(DISTINCT se.user_id) as total_enrollments,
+        COUNT(DISTINCT CASE WHEN se.enrollment_status = 'active' THEN se.user_id END) as active_enrollments,
+        COUNT(DISTINCT CASE WHEN se.enrollment_status = 'completed' THEN se.user_id END) as completed_enrollments,
+        COUNT(DISTINCT CASE WHEN se.enrollment_status = 'dropped' THEN se.user_id END) as dropped_enrollments,
+        COALESCE(SUM(se.total_amount), 0) as total_amount,
+        COALESCE(SUM(se.amount_paid), 0) as total_paid,
+        COALESCE(SUM(se.balance), 0) as total_balance
+      FROM semesters s
+      LEFT JOIN semester_enrollments se ON s.id = se.semester_id
+      WHERE s.hostel_id = $1
+      GROUP BY s.id, s.name, s.academic_year, s.start_date, s.end_date, s.status, s.is_current
+      ORDER BY s.start_date DESC`,
+      [hostelId]
+    );
+
+    return result.rows.map(row => ({
+      id: row.semester_id,
+      name: row.semester_name,
+      academic_year: row.academic_year,
+      start_date: row.start_date,
+      end_date: row.end_date,
+      status: row.semester_status || 'active', // Map semester_status to status, default to 'active'
+      is_current: row.is_current,
+      total_enrollments: parseInt(row.total_enrollments) || 0,
+      active_enrollments: parseInt(row.active_enrollments) || 0,
+      completed_enrollments: parseInt(row.completed_enrollments) || 0,
+      dropped_enrollments: parseInt(row.dropped_enrollments) || 0,
+      total_amount: parseFloat(row.total_amount) || 0,
+      total_paid: parseFloat(row.total_paid) || 0,
+      total_balance: parseFloat(row.total_balance) || 0,
+    }));
+  }
 }
 

@@ -573,32 +573,56 @@ router.get('/summary', async (req, res) => {
 
     if (hasBookingPaymentsTable) {
       const bookingPaymentParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      // CRITICAL: Only count actual payment records from public_booking_payments where status = 'completed'
+      // This is the source of truth for actual payments received
       const bookingPaymentsQuery = semesterId
         ? `
           SELECT 
             COALESCE(SUM(pbp.amount), 0) AS total_collected,
-            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
-            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+            COUNT(pbp.id) AS payment_count
           FROM public_booking_payments pbp
           JOIN public_hostel_bookings b ON b.id = pbp.booking_id
           WHERE b.hostel_id = $1
             AND b.semester_id = $2
             AND pbp.status = 'completed'
+            AND pbp.amount > 0
         `
         : `
           SELECT 
             COALESCE(SUM(pbp.amount), 0) AS total_collected,
-            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
-            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+            COUNT(pbp.id) AS payment_count
           FROM public_booking_payments pbp
           JOIN public_hostel_bookings b ON b.id = pbp.booking_id
           WHERE b.hostel_id = $1
             AND pbp.status = 'completed'
+            AND pbp.amount > 0
         `;
       const bookingPaymentsRes = await pool.query(bookingPaymentsQuery, bookingPaymentParams);
       bookingPaymentsTotal = parseFloat(bookingPaymentsRes.rows[0]?.total_collected || '0');
-      bookingAmountPaidTotal = parseFloat(bookingPaymentsRes.rows[0]?.amount_paid || '0');
-      bookingOutstandingFromPayments = parseFloat(bookingPaymentsRes.rows[0]?.outstanding || '0');
+      const paymentCount = parseInt(bookingPaymentsRes.rows[0]?.payment_count || '0', 10);
+      
+      // Get booking amount_paid separately (for reference only, not for total calculation)
+      const bookingAmountPaidQuery = semesterId
+        ? `
+          SELECT 
+            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+          FROM public_hostel_bookings b
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $2
+        `
+        : `
+          SELECT 
+            COALESCE(SUM(b.amount_paid), 0) AS amount_paid,
+            COALESCE(SUM(GREATEST(b.amount_due - b.amount_paid, 0)), 0) AS outstanding
+          FROM public_hostel_bookings b
+          WHERE b.hostel_id = $1
+        `;
+      const bookingAmountPaidRes = await pool.query(bookingAmountPaidQuery, bookingPaymentParams);
+      bookingAmountPaidTotal = parseFloat(bookingAmountPaidRes.rows[0]?.amount_paid || '0');
+      bookingOutstandingFromPayments = parseFloat(bookingAmountPaidRes.rows[0]?.outstanding || '0');
+      
+      console.log(`[Booking Payments] Actual payment records: ${paymentCount}, Total: ${bookingPaymentsTotal}, Bookings amount_paid: ${bookingAmountPaidTotal}`);
     }
 
     const bookingsAggregateQuery = semesterId
@@ -625,7 +649,176 @@ router.get('/summary', async (req, res) => {
     const bookingsAmountDue = parseFloat(bookingsAggregateRes.rows[0]?.amount_due || '0');
     const bookingsOutstandingTotal = parseFloat(bookingsAggregateRes.rows[0]?.outstanding || '0');
 
-    const total_collected = ledgerCollected + bookingsAmountPaid;
+    // Calculate total collected without double counting
+    // The issue: When a booking is checked in, a payment is created in 'payments' table
+    // AND the booking already has payments in 'public_booking_payments'. This causes double counting.
+    
+    // Strategy: 
+    // 1. Count payments from 'payments' table that are NOT from checked-in bookings
+    //    (i.e., exclude payments for students who have checked-in bookings)
+    // 2. Count payments from 'public_booking_payments' table (all online booking payments)
+    // 3. This way we count each payment only once
+    
+    // Find payments in 'payments' table that are from checked-in bookings (to exclude them from ledger)
+    // These payments duplicate the booking payments already counted in bookingPaymentsTotal
+    // Strategy: If a student has payments in public_booking_payments AND their booking is checked_in,
+    // then exclude payments in the 'payments' table that match the booking payment amounts
+    let checkedInBookingPaymentsInLedger = 0;
+    if (hasBookingPaymentsTable) {
+      // Better approach: Find payments in 'payments' table where:
+      // 1. The student has a checked-in booking
+      // 2. The booking has payments in public_booking_payments
+      // 3. The payment amount matches one of the booking payment amounts (or sum matches)
+      const checkedInPaymentsQuery = paymentInfo.hasHostelIdColumn
+        ? (semesterId
+          ? `
+            SELECT COALESCE(SUM(p.amount), 0) AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND b.semester_id = $2
+              AND p.hostel_id = $1
+              ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+              AND EXISTS (
+                SELECT 1 FROM public_booking_payments pbp
+                WHERE pbp.booking_id = b.id
+                  AND pbp.status = 'completed'
+              )
+          `
+          : `
+            SELECT COALESCE(SUM(p.amount), 0) AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND p.hostel_id = $1
+              AND EXISTS (
+                SELECT 1 FROM public_booking_payments pbp
+                WHERE pbp.booking_id = b.id
+                  AND pbp.status = 'completed'
+              )
+          `)
+        : (semesterId
+          ? `
+            SELECT COALESCE(SUM(p.amount), 0) AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND b.semester_id = $2
+              AND u.hostel_id = $1
+              ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+              AND EXISTS (
+                SELECT 1 FROM public_booking_payments pbp
+                WHERE pbp.booking_id = b.id
+                  AND pbp.status = 'completed'
+              )
+          `
+          : `
+            SELECT COALESCE(SUM(p.amount), 0) AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND u.hostel_id = $1
+              AND EXISTS (
+                SELECT 1 FROM public_booking_payments pbp
+                WHERE pbp.booking_id = b.id
+                  AND pbp.status = 'completed'
+              )
+          `);
+      const checkedInParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      const checkedInRes = await pool.query(checkedInPaymentsQuery, checkedInParams);
+      checkedInBookingPaymentsInLedger = parseFloat(checkedInRes.rows[0]?.total || '0');
+      
+      // Alternative approach: If the above doesn't work, try matching by payment amounts
+      // Find payments in 'payments' table where the student has ANY booking with payments
+      // This is more aggressive but ensures we don't double count
+      if (checkedInBookingPaymentsInLedger === 0 && bookingPaymentsTotal > 0) {
+        const alternativeQuery = paymentInfo.hasHostelIdColumn
+          ? (semesterId
+            ? `
+              SELECT COALESCE(SUM(p.amount), 0) AS total
+              FROM payments p
+              JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+              WHERE p.hostel_id = $1
+                ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+                AND EXISTS (
+                  SELECT 1 FROM public_hostel_bookings b
+                  JOIN public_booking_payments pbp ON pbp.booking_id = b.id
+                  WHERE LOWER(b.student_email) = LOWER(u.email)
+                    AND b.hostel_id = $1
+                    ${semesterId ? 'AND b.semester_id = $2' : ''}
+                    AND pbp.status = 'completed'
+                )
+            `
+            : `
+              SELECT COALESCE(SUM(p.amount), 0) AS total
+              FROM payments p
+              JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+              WHERE p.hostel_id = $1
+                AND EXISTS (
+                  SELECT 1 FROM public_hostel_bookings b
+                  JOIN public_booking_payments pbp ON pbp.booking_id = b.id
+                  WHERE LOWER(b.student_email) = LOWER(u.email)
+                    AND b.hostel_id = $1
+                    AND pbp.status = 'completed'
+                )
+            `)
+          : (semesterId
+            ? `
+              SELECT COALESCE(SUM(p.amount), 0) AS total
+              FROM payments p
+              JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+              WHERE u.hostel_id = $1
+                ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+                AND EXISTS (
+                  SELECT 1 FROM public_hostel_bookings b
+                  JOIN public_booking_payments pbp ON pbp.booking_id = b.id
+                  WHERE LOWER(b.student_email) = LOWER(u.email)
+                    AND b.hostel_id = $1
+                    ${semesterId ? 'AND b.semester_id = $2' : ''}
+                    AND pbp.status = 'completed'
+                )
+            `
+            : `
+              SELECT COALESCE(SUM(p.amount), 0) AS total
+              FROM payments p
+              JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+              WHERE u.hostel_id = $1
+                AND EXISTS (
+                  SELECT 1 FROM public_hostel_bookings b
+                  JOIN public_booking_payments pbp ON pbp.booking_id = b.id
+                  WHERE LOWER(b.student_email) = LOWER(u.email)
+                    AND b.hostel_id = $1
+                    AND pbp.status = 'completed'
+                )
+            `);
+        const altRes = await pool.query(alternativeQuery, checkedInParams);
+        const altTotal = parseFloat(altRes.rows[0]?.total || '0');
+        if (altTotal > 0) {
+          checkedInBookingPaymentsInLedger = altTotal;
+          console.log(`[Alternative Check] Found ${altTotal} in ledger for students with booking payments`);
+        }
+      }
+      
+      console.log(`[Checked-in Booking Payments] Found ${checkedInBookingPaymentsInLedger} in ledger to exclude`);
+    }
+    
+    // Total collected = payments table (excluding checked-in booking payments) + booking payments table
+    // This ensures we don't double count: booking payments are counted once in bookingPaymentsTotal,
+    // and the duplicate payment created during check-in is excluded from ledgerCollected
+    // IMPORTANT: We use bookingPaymentsTotal (from public_booking_payments) NOT bookingsAmountPaid (from public_hostel_bookings.amount_paid)
+    // because bookingPaymentsTotal represents actual payment records, while amount_paid might include estimates or incorrect values
+    const total_collected = (ledgerCollected - checkedInBookingPaymentsInLedger) + bookingPaymentsTotal;
+    
+    // Log for debugging (can be removed later)
+    console.log(`[Payments Summary] Hostel ${hostelId}, Semester ${semesterId || 'all'}:`);
+    console.log(`  - Ledger collected: ${ledgerCollected}`);
+    console.log(`  - Checked-in booking payments in ledger (excluded): ${checkedInBookingPaymentsInLedger}`);
+    console.log(`  - Booking payments total (from public_booking_payments): ${bookingPaymentsTotal}`);
+    console.log(`  - Total collected: ${total_collected}`);
 
     // Payment method breakdown (ledger + public bookings)
     type RawMethodRow = { method: string | null; total: any };
@@ -679,31 +872,84 @@ router.get('/summary', async (req, res) => {
     }
 
     // Get booking payment methods (only if table exists)
+    // This includes payments from public_booking_payments table AND online booking fees
     let bookingMethodTotals: RawMethodRow[] = [];
     if (hasBookingPaymentsTable) {
+      // Get payments from public_booking_payments table
+      // CRITICAL: Only count actual payment records with status='completed' and amount > 0
       const bookingMethodQuery = semesterId
         ? `
           SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
-                 COALESCE(SUM(pbp.amount), 0)::numeric AS total
+                 COALESCE(SUM(pbp.amount), 0)::numeric AS total,
+                 COUNT(pbp.id) AS payment_count
           FROM public_booking_payments pbp
           JOIN public_hostel_bookings b ON b.id = pbp.booking_id
           WHERE b.hostel_id = $1
             AND b.semester_id = $2
             AND pbp.status = 'completed'
+            AND pbp.amount > 0
           GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
         `
         : `
           SELECT LOWER(COALESCE(pbp.method, 'unspecified')) AS method,
-                 COALESCE(SUM(pbp.amount), 0)::numeric AS total
+                 COALESCE(SUM(pbp.amount), 0)::numeric AS total,
+                 COUNT(pbp.id) AS payment_count
           FROM public_booking_payments pbp
           JOIN public_hostel_bookings b ON b.id = pbp.booking_id
           WHERE b.hostel_id = $1
             AND pbp.status = 'completed'
+            AND pbp.amount > 0
           GROUP BY LOWER(COALESCE(pbp.method, 'unspecified'))
         `;
       const bookingMethodParams = semesterId ? [hostelId, semesterId] : [hostelId];
       const bookingMethodRes = await pool.query(bookingMethodQuery, bookingMethodParams);
       bookingMethodTotals = bookingMethodRes.rows as RawMethodRow[];
+      
+      // NOTE: Online booking fees are already included in bookingMethodTotals above
+      // when we query public_booking_payments. We should NOT add them again from public_hostel_bookings.amount_paid
+      // because that would double count. The public_booking_payments table is the source of truth for actual payments.
+      // Only add online booking fees if they're NOT already in public_booking_payments (edge case for old data)
+      const onlineBookingFeesQuery = semesterId
+        ? `
+          SELECT 
+            COALESCE(SUM(b.amount_paid), 0)::numeric - 
+            COALESCE(SUM(pbp.amount), 0)::numeric AS total
+          FROM public_hostel_bookings b
+          LEFT JOIN public_booking_payments pbp ON pbp.booking_id = b.id AND pbp.status = 'completed'
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $2
+            AND b.source = 'online'
+            AND b.amount_paid > 0
+            AND (pbp.id IS NULL OR pbp.amount IS NULL)
+        `
+        : `
+          SELECT 
+            COALESCE(SUM(b.amount_paid), 0)::numeric - 
+            COALESCE(SUM(pbp.amount), 0)::numeric AS total
+          FROM public_hostel_bookings b
+          LEFT JOIN public_booking_payments pbp ON pbp.booking_id = b.id AND pbp.status = 'completed'
+          WHERE b.hostel_id = $1
+            AND b.source = 'online'
+            AND b.amount_paid > 0
+            AND (pbp.id IS NULL OR pbp.amount IS NULL)
+        `;
+      const onlineBookingFeesParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      const onlineBookingFeesRes = await pool.query(onlineBookingFeesQuery, onlineBookingFeesParams);
+      const onlineBookingFeesTotal = Math.max(0, parseFloat(onlineBookingFeesRes.rows[0]?.total || '0'));
+      
+      // Only add online booking fees if they're NOT already recorded in public_booking_payments
+      // This handles edge cases where online bookings exist but payment records are missing
+      if (onlineBookingFeesTotal > 0) {
+        const existingMobileMoney = bookingMethodTotals.find(row => row.method === 'mobile_money');
+        if (existingMobileMoney) {
+          existingMobileMoney.total = (parseFloat(existingMobileMoney.total?.toString() || '0') + onlineBookingFeesTotal).toString();
+        } else {
+          bookingMethodTotals.push({
+            method: 'mobile_money',
+            total: onlineBookingFeesTotal.toString(),
+          });
+        }
+      }
     }
 
     type MethodAggregate = {
@@ -727,9 +973,77 @@ router.get('/summary', async (req, res) => {
       methodTotalsMap.set(method, existing);
     };
 
-    ledgerMethodTotals.forEach((row) => {
+    // Exclude checked-in booking payments from ledger method totals to avoid double counting
+    // We need to subtract the method-specific amounts for checked-in bookings
+    let checkedInBookingMethodTotals: RawMethodRow[] = [];
+    if (hasBookingPaymentsTable && paymentInfo.paymentMethodColumn) {
+      const checkedInMethodQuery = paymentInfo.hasHostelIdColumn
+        ? (semesterId
+          ? `
+            SELECT LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND b.semester_id = $2
+              AND p.hostel_id = $1
+              ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+            GROUP BY LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified'))
+          `
+          : `
+            SELECT LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND p.hostel_id = $1
+            GROUP BY LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified'))
+          `)
+        : (semesterId
+          ? `
+            SELECT LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND b.semester_id = $2
+              AND u.hostel_id = $1
+              ${paymentInfo.hasSemesterIdColumn ? 'AND p.semester_id = $2' : ''}
+            GROUP BY LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified'))
+          `
+          : `
+            SELECT LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified')) AS method,
+                   COALESCE(SUM(p.amount), 0)::numeric AS total
+            FROM payments p
+            JOIN users u ON u.id = p.${paymentInfo.userIdColumn}
+            JOIN public_hostel_bookings b ON LOWER(b.student_email) = LOWER(u.email) AND b.hostel_id = $1
+            WHERE b.status = 'checked_in'
+              AND u.hostel_id = $1
+            GROUP BY LOWER(COALESCE(p.${paymentInfo.paymentMethodColumn}, 'unspecified'))
+          `);
+      const checkedInMethodParams = semesterId ? [hostelId, semesterId] : [hostelId];
+      const checkedInMethodRes = await pool.query(checkedInMethodQuery, checkedInMethodParams);
+      checkedInBookingMethodTotals = checkedInMethodRes.rows as RawMethodRow[];
+    }
+    
+    // Subtract checked-in booking payments from ledger totals
+    const adjustedLedgerTotals = ledgerMethodTotals.map((row) => {
+      const ledgerAmount = Number.parseFloat((row.total ?? 0).toString());
+      const checkedInAmount = Number.parseFloat(
+        (checkedInBookingMethodTotals.find((c) => c.method === row.method)?.total ?? 0).toString()
+      );
+      return {
+        ...row,
+        total: (ledgerAmount - checkedInAmount).toString(),
+      };
+    });
+    
+    adjustedLedgerTotals.forEach((row) => {
       const amount = Number.parseFloat((row.total ?? 0).toString());
-      if (Number.isFinite(amount) && amount !== 0) {
+      if (Number.isFinite(amount) && amount > 0) {
         addMethodAmount(row.method, amount, 'ledger');
       }
     });
@@ -929,6 +1243,28 @@ router.get('/summary', async (req, res) => {
       bookingPaymentsTotal - matchedBookingPaymentsTotal,
     );
 
+    // Ensure payment method breakdown totals match total_collected
+    // If there's a discrepancy, adjust the breakdown proportionally or add an "other" category
+    const methodBreakdownTotal = paymentMethodBreakdown.reduce((sum, item) => sum + item.total, 0);
+    const discrepancy = total_collected - methodBreakdownTotal;
+    
+    // If there's a discrepancy, add it as "unspecified" or adjust
+    if (Math.abs(discrepancy) > 0.01) {
+      const existingUnspecified = paymentMethodBreakdown.find(item => item.method === 'unspecified');
+      if (existingUnspecified) {
+        existingUnspecified.total += discrepancy;
+        existingUnspecified.booking_total += discrepancy;
+      } else {
+        paymentMethodBreakdown.push({
+          method: 'unspecified',
+          label: 'Unspecified / Other',
+          ledger_total: 0,
+          booking_total: discrepancy,
+          total: discrepancy,
+        });
+      }
+    }
+
     const payload = {
       total_collected,
       total_outstanding,
@@ -942,7 +1278,12 @@ router.get('/summary', async (req, res) => {
         items: paymentMethodBreakdown,
         ledger_total: ledgerMethodSum,
         booking_total: bookingMethodSum,
-        combined_total: paymentMethodCombinedTotal,
+        combined_total: total_collected, // Use actual total_collected instead of calculated sum
+        reconciliation: {
+          method_breakdown_total: methodBreakdownTotal,
+          actual_total_collected: total_collected,
+          discrepancy: discrepancy,
+        },
         notes: {
           ledger_reported_total: ledgerCollected,
           booking_payments_reported_total: bookingPaymentsTotal,

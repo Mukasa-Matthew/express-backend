@@ -980,10 +980,24 @@ router.post('/:id/resend-credentials', async (req, res) => {
     }
 
     // Audit log success
+    // Use the correct audit_logs table structure: user_id, action, entity_type, entity_id, changes, ip_address, user_agent
     await pool.query(
-      `INSERT INTO audit_logs (action, requester_user_id, target_user_id, target_hostel_id, status, message, ip_address, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      ['resend_admin_credentials', currentUser.id, admin.id, hostelId, 'success', 'Password rotated and email sent', ip, (req.headers['user-agent'] as string) || null]
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, changes, ip_address, user_agent, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [
+        currentUser.id,
+        'resend_admin_credentials',
+        'user',
+        admin.id,
+        JSON.stringify({ 
+          target_user_id: admin.id, 
+          target_hostel_id: hostelId, 
+          status: 'success', 
+          message: 'Password rotated and email sent' 
+        }),
+        ip,
+        (req.headers['user-agent'] as string) || null
+      ]
     );
 
     // Return credentials in response so super admin can view/copy them
@@ -1015,10 +1029,22 @@ router.post('/:id/resend-credentials', async (req, res) => {
       const authResult = await verifyTokenAndGetUser(req);
       const requesterId = authResult?.userId || null;
       const hostelId = Number(req.params.id) || null;
+      // Use the correct audit_logs table structure: user_id, action, entity_type, entity_id, changes, ip_address, user_agent
       await pool.query(
-        `INSERT INTO audit_logs (action, requester_user_id, target_user_id, target_hostel_id, status, message, ip_address, user_agent)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        ['resend_admin_credentials', requesterId, null, hostelId, 'failure', 'Internal server error', (req.headers['x-forwarded-for'] as string) || req.ip || '', (req.headers['user-agent'] as string) || null]
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, changes, ip_address, user_agent, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [
+          requesterId,
+          'resend_admin_credentials',
+          'hostel',
+          hostelId,
+          JSON.stringify({ 
+            status: 'failure', 
+            message: 'Internal server error' 
+          }),
+          (req.headers['x-forwarded-for'] as string) || req.ip || '',
+          (req.headers['user-agent'] as string) || null
+        ]
       );
     } catch {}
     res.status(500).json({

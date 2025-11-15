@@ -24,10 +24,12 @@ import semestersRoutes from './routes/semesters';
 import publicRoutes from './routes/public';
 import hostelImagesRoutes from './routes/hostel-images';
 import bookingsRoutes from './routes/bookings';
+import auditLogsRoutes from './routes/audit-logs';
 import { SubscriptionNotificationService } from './services/subscriptionNotificationService';
 import { SemesterService } from './services/semesterService';
 import { EmailService } from './services/emailService';
 import { initializeDatabase } from './database/initialize';
+import { errorHandler } from './middleware/errorHandler';
 import path from 'path';
 
 // Load environment variables
@@ -189,6 +191,7 @@ app.use('/api/expenses', writeLimiter, expensesRoutes);
 app.use('/api/subscription-plans', writeLimiter, subscriptionPlansRoutes);
 app.use('/api/semesters', writeLimiter, semestersRoutes);
 app.use('/api/bookings', writeLimiter, bookingsRoutes);
+app.use('/api/audit-logs', auditLogsRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/hostels', hostelImagesRoutes);
 
@@ -232,14 +235,8 @@ app.use('*', (req, res) => {
   });
 });
 
-// Error handler
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error('Error:', err);
-  res.status(500).json({ 
-    success: false, 
-    message: 'Internal server error' 
-  });
-});
+// Error handler (must be last)
+app.use(errorHandler);
 
 // Initialize database and start server
 async function startServer() {
@@ -315,7 +312,18 @@ cron.schedule('0 8 * * *', async () => {
   timezone: 'UTC'
 });
 
+// Schedule booking expiration checks
+// Run every 15 minutes to expire pending bookings
+const { BookingService } = require('./services/bookingService');
+cron.schedule('*/15 * * * *', async () => {
+  console.log('⏰ Running scheduled booking expiration check...');
+  await BookingService.expirePendingBookings(30); // Expire bookings older than 30 minutes
+}, {
+  timezone: 'UTC'
+});
+
 console.log('⏰ Subscription notification scheduler initialized (runs daily at 9:00 AM UTC)');
 console.log('📅 Semester management scheduler initialized (runs daily at 8:00 AM UTC)');
+console.log('⏰ Booking expiration scheduler initialized (runs every 15 minutes)');
 
 export default app;

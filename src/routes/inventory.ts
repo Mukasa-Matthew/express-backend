@@ -113,7 +113,15 @@ router.post('/', async (req: Request, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    
+    // Only custodians can create inventory items (hostel_admin should not create inventory)
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can add inventory items. Hostel administrators can view inventory and reports.' 
+      });
+    }
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
     
@@ -187,7 +195,15 @@ router.put('/:id', async (req: Request, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    
+    // Only custodians can update inventory items (hostel_admin should not update inventory)
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can update inventory items. Hostel administrators can view inventory and reports.' 
+      });
+    }
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
     const { id } = req.params;
@@ -268,7 +284,15 @@ router.delete('/:id', async (req, res) => {
     let decoded: any;
     try { decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret'); } catch { return res.status(401).json({ success: false, message: 'Invalid token' }); }
     const currentUser = await UserModel.findById(decoded.userId);
-    if (!currentUser || (currentUser.role !== 'hostel_admin' && currentUser.role !== 'custodian')) return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    
+    // Only custodians can delete inventory items (hostel_admin should not delete inventory)
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only custodians can delete inventory items. Hostel administrators can view inventory and reports.' 
+      });
+    }
     const hostelId = await getHostelId(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
     const { id } = req.params;

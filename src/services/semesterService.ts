@@ -6,6 +6,7 @@ export class SemesterService {
   /**
    * Check and automatically end semesters that have passed their end date
    * Runs daily
+   * Also prevents student registration if no active semester exists
    */
   static async checkAndEndSemesters(): Promise<void> {
     try {
@@ -23,6 +24,46 @@ export class SemesterService {
 
       for (const semester of expiredSemesters.rows) {
         await this.endSemester(semester.id);
+      }
+
+      // Also check for semesters that should be marked as current but aren't
+      // This ensures at least one semester is marked as current per hostel
+      const hostelsWithoutCurrentSemester = await pool.query(
+        `SELECT DISTINCT h.id, h.name
+         FROM hostels h
+         LEFT JOIN semesters s ON s.hostel_id = h.id AND s.is_current = true AND s.status = 'active'
+         WHERE s.id IS NULL
+           AND EXISTS (SELECT 1 FROM semesters WHERE hostel_id = h.id)`
+      );
+
+      for (const hostel of hostelsWithoutCurrentSemester.rows) {
+        // Find the most recent upcoming or active semester for this hostel
+        const nextSemester = await pool.query(
+          `SELECT * FROM semesters
+           WHERE hostel_id = $1
+           ORDER BY start_date DESC
+           LIMIT 1`,
+          [hostel.id]
+        );
+
+        if (nextSemester.rows.length > 0) {
+          const semester = nextSemester.rows[0];
+          // If semester hasn't started yet, mark as upcoming
+          if (new Date(semester.start_date) > today) {
+            await pool.query(
+              `UPDATE semesters SET status = 'upcoming', is_current = true WHERE id = $1`,
+              [semester.id]
+            );
+            console.log(`✅ Set semester ${semester.id} as current for hostel ${hostel.name}`);
+          } else if (new Date(semester.start_date) <= today && new Date(semester.end_date) >= today) {
+            // If semester is in progress, mark as active and current
+            await pool.query(
+              `UPDATE semesters SET status = 'active', is_current = true WHERE id = $1`,
+              [semester.id]
+            );
+            console.log(`✅ Activated semester ${semester.id} for hostel ${hostel.name}`);
+          }
+        }
       }
 
       console.log('✅ Semester expiration check completed');
