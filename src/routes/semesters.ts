@@ -39,6 +39,33 @@ async function getHostelIdForUser(userId: number, role: string): Promise<number 
     return result.rows[0]?.hostel_id || null;
   }
   
+  if (role === 'user') {
+    // For students, get hostel_id from users table, or derive from active room assignment
+    const userResult = await pool.query('SELECT hostel_id FROM users WHERE id = $1', [userId]);
+    const fromUser = userResult.rows[0]?.hostel_id || null;
+    if (fromUser) return fromUser;
+    
+    // Try to get hostel from active room assignment
+    const sraColsRes = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name = 'student_room_assignments'
+    `);
+    const sraCols = new Set<string>(sraColsRes.rows.map((r: any) => r.column_name));
+    const sraUserCol = sraCols.has('student_id') ? 'student_id' : 'user_id';
+    
+    const roomResult = await pool.query(
+      `SELECT r.hostel_id 
+       FROM student_room_assignments sra
+       JOIN rooms r ON r.id = sra.room_id
+       WHERE sra.${sraUserCol} = $1 AND sra.status = 'active'
+       ORDER BY sra.id DESC
+       LIMIT 1`,
+      [userId]
+    );
+    return roomResult.rows[0]?.hostel_id || null;
+  }
+  
   return null;
 }
 
@@ -761,4 +788,3 @@ router.post('/:semesterId/rollover', async (req, res) => {
 });
 
 export default router;
-

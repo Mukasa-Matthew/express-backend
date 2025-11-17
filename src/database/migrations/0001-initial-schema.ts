@@ -1,15 +1,16 @@
 /**
  * Initial schema migration
- * This migration is a no-op since createAllTables already runs on startup
- * It's marked as applied to track that the initial schema exists
+ * Creates all base tables from create-all-tables.sql
  */
+import createAllTables from '../run-create-all-tables';
+
 export default async function runMigration() {
-  // This migration is intentionally empty because:
-  // 1. createAllTables() already runs on startup
-  // 2. This just marks the initial schema as "migrated"
-  // 3. Prevents confusion about migration status
+  console.log('Creating initial schema tables...');
   
-  console.log('Initial schema migration - already handled by createAllTables()');
-  // No actual migration needed - just marking as complete
+  // Actually create all tables to ensure they exist
+  // This is necessary when running migrations directly (not on server startup)
+  await createAllTables();
+  
+  console.log('Initial schema migration completed');
 }
 

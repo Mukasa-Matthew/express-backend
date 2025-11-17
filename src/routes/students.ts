@@ -9,6 +9,10 @@ import { SemesterEnrollmentModel } from '../models/Semester';
 
 const router = express.Router();
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getHostelIdForUser(userId: number, role: string): Promise<number | null> {
   if (role === 'hostel_admin') {
     const u = await UserModel.findById(userId);
@@ -112,8 +116,23 @@ router.get('/', async (req, res) => {
     const params: any[] = [hostelId];
 
     if (semesterId) {
-      // If filtering by semester, filter by specific semester
-      query += ` AND se.semester_id = $${params.length + 1}`;
+      // If filtering by semester, include students linked by enrollment OR payments OR online bookings
+      const semesterParamIndex = params.length + 1;
+      query += ` AND (
+        se.semester_id = $${semesterParamIndex}
+        OR EXISTS (
+          SELECT 1 FROM payments p
+          WHERE p.${paymentCol} = u.id
+          AND p.semester_id = $${semesterParamIndex}
+        )
+        OR EXISTS (
+          SELECT 1 FROM public_hostel_bookings b
+          WHERE b.hostel_id = $1
+            AND b.semester_id = $${semesterParamIndex}
+            AND b.student_email IS NOT NULL
+            AND LOWER(b.student_email) = LOWER(u.email)
+        )
+      )`;
       params.push(semesterId);
     }
 
@@ -192,8 +211,36 @@ router.get('/summary/semesters', async (req, res) => {
     const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
 
-    const summary = await SemesterEnrollmentModel.getSemesterSummary(hostelId);
-    res.json({ success: true, data: summary });
+    const attempt = async () => SemesterEnrollmentModel.getSemesterSummary(hostelId);
+
+    try {
+      const summary = await attempt();
+      return res.json({ success: true, data: summary });
+    } catch (e: any) {
+      const msg = String(e?.message || e || '');
+      const isTransient =
+        msg.includes('Connection terminated') ||
+        msg.includes('timeout') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('terminat');
+
+      if (isTransient) {
+        console.warn('Semester summary transient error, retrying once...:', msg);
+        await sleep(250);
+        try {
+          const summary = await attempt();
+          return res.json({ success: true, data: summary });
+        } catch (e2: any) {
+          console.error('Semester summary retry failed:', e2?.message || e2);
+          // Graceful fallback to avoid 500 on transient DB issues
+          return res.json({ success: true, data: [] });
+        }
+      }
+
+      // Non-transient error
+      console.error('Semester summary error:', msg);
+      return res.status(500).json({ success: false, message: 'Failed to load semester summary' });
+    }
   } catch (e) {
     console.error('Semester summary error:', e);
     res.status(500).json({ success: false, message: 'Failed to load semester summary' });
@@ -286,6 +333,32 @@ router.post('/', async (req: Request, res) => {
         [room_id]
       );
       const room = roomResult.rows[0];
+
+      // Send student credentials email if a new user was created
+      try {
+        if (registrationResult.isNewUser && registrationResult.temporaryPassword) {
+          const hostelMeta = await client.query('SELECT name FROM hostels WHERE id = $1', [hostelId]);
+          const hostelName = hostelMeta.rows[0]?.name || 'Your Hostel';
+          const loginBase = process.env.FRONTEND_URL?.trim() || 'http://localhost:3000';
+          const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+
+          const html = EmailService.generateStudentWelcomeEmail(
+            name,
+            email,
+            email,
+            registrationResult.temporaryPassword,
+            hostelName,
+            loginUrl
+          );
+          await EmailService.sendEmail({
+            to: email,
+            subject: `Welcome to ${hostelName} - Your Student Account`,
+            html,
+          });
+        }
+      } catch (emailErr) {
+        console.warn('Student welcome email failed (non-blocking):', (emailErr as any)?.message || emailErr);
+      }
 
       return res.status(201).json({
         success: true,
@@ -670,6 +743,451 @@ router.post('/notify', async (req, res) => {
   } catch (e) {
     console.error('Notify students error:', e);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Resend mobile app credentials to a student (custodian/hostel_admin)
+router.post('/resend-credentials', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (currentUser.role !== 'custodian' && currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
+    if (currentUser.role !== 'super_admin' && !hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const { studentId, email } = req.body as any;
+    if (!studentId && !email) {
+      return res.status(400).json({ success: false, message: 'studentId or email is required' });
+    }
+
+    // Load student by id/email and ensure belongs to this hostel
+    const pool = require('../config/database').default || require('../config/database');
+    const client = await pool.connect();
+    try {
+      let studentRow: any = null;
+      if (studentId) {
+        const res1 = await client.query(
+          `SELECT id, email, name, hostel_id FROM users WHERE id = $1 AND role = 'user'`,
+          [studentId],
+        );
+        studentRow = res1.rows[0] || null;
+      } else if (email) {
+        const res2 = await client.query(
+          `SELECT id, email, name, hostel_id FROM users WHERE LOWER(email) = LOWER($1) AND role = 'user'`,
+          [email],
+        );
+        studentRow = res2.rows[0] || null;
+      }
+
+      if (!studentRow) {
+        return res.status(404).json({ success: false, message: 'Student not found' });
+      }
+      if (currentUser.role !== 'super_admin' && hostelId && studentRow.hostel_id !== hostelId) {
+        return res.status(403).json({ success: false, message: 'Student not in your hostel' });
+      }
+
+      // Generate temp password and email credentials
+      const bcrypt = require('bcryptjs');
+      const { CredentialGenerator } = require('../utils/credentialGenerator');
+      const { EmailService } = require('../services/emailService');
+
+      const tempPassword = CredentialGenerator.generatePatternPassword();
+      const hashed = await bcrypt.hash(tempPassword, 10);
+
+      // Mark password as temp if supported
+      const colCheck = await client.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`,
+      );
+      if (colCheck.rows.length > 0) {
+        await client.query(
+          `UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2`,
+          [hashed, studentRow.id],
+        );
+      } else {
+        await client.query(`UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, [
+          hashed,
+          studentRow.id,
+        ]);
+      }
+
+      // Hostel name for email
+      let hostelName = 'Hostel';
+      if (studentRow.hostel_id) {
+        const hRes = await client.query('SELECT name FROM hostels WHERE id = $1', [studentRow.hostel_id]);
+        hostelName = hRes.rows[0]?.name || hostelName;
+      }
+
+      const loginBase = (process.env.FRONTEND_URL || '').trim() || 'http://localhost:3000';
+      const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+      const html = EmailService.generateStudentWelcomeEmail(
+        studentRow.name,
+        studentRow.email,
+        studentRow.email,
+        tempPassword,
+        hostelName,
+        loginUrl,
+      );
+      await EmailService.sendEmail({
+        to: studentRow.email,
+        subject: `Your RooMio App Credentials - ${hostelName}`,
+        html,
+      });
+
+      return res.json({ success: true, message: 'Credentials sent' });
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error('Resend student credentials error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to send credentials' });
+  }
+});
+
+// Issue credentials (generate + return temp password) for custodian/hostel_admin to share manually
+router.post('/issue-credentials', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (currentUser.role !== 'custodian' && currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
+    if (currentUser.role !== 'super_admin' && !hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const { studentId, email } = req.body as any;
+    if (!studentId && !email) {
+      return res.status(400).json({ success: false, message: 'studentId or email is required' });
+    }
+
+    const pool = require('../config/database').default || require('../config/database');
+    const client = await pool.connect();
+    try {
+      let studentRow: any = null;
+      if (studentId) {
+        const res1 = await client.query(
+          `SELECT id, email, name, hostel_id FROM users WHERE id = $1 AND role = 'user'`,
+          [studentId],
+        );
+        studentRow = res1.rows[0] || null;
+      } else if (email) {
+        const res2 = await client.query(
+          `SELECT id, email, name, hostel_id FROM users WHERE LOWER(email) = LOWER($1) AND role = 'user'`,
+          [email],
+        );
+        studentRow = res2.rows[0] || null;
+      }
+
+      if (!studentRow) {
+        return res.status(404).json({ success: false, message: 'Student not found' });
+      }
+      if (currentUser.role !== 'super_admin' && hostelId && studentRow.hostel_id !== hostelId) {
+        return res.status(403).json({ success: false, message: 'Student not in your hostel' });
+      }
+
+      const bcrypt = require('bcryptjs');
+      const { CredentialGenerator } = require('../utils/credentialGenerator');
+      const { EmailService } = require('../services/emailService');
+
+      const tempPassword = CredentialGenerator.generatePatternPassword();
+      const hashed = await bcrypt.hash(tempPassword, 10);
+
+      const colCheck = await client.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`,
+      );
+      if (colCheck.rows.length > 0) {
+        await client.query(
+          `UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2`,
+          [hashed, studentRow.id],
+        );
+      } else {
+        await client.query(`UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, [
+          hashed,
+          studentRow.id,
+        ]);
+      }
+
+      // Optional: send email in background as well
+      try {
+        let hostelName = 'Hostel';
+        if (studentRow.hostel_id) {
+          const hRes = await client.query('SELECT name FROM hostels WHERE id = $1', [studentRow.hostel_id]);
+          hostelName = hRes.rows[0]?.name || hostelName;
+        }
+        const loginBase = (process.env.FRONTEND_URL || '').trim() || 'http://localhost:3000';
+        const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+        const html = EmailService.generateStudentWelcomeEmail(
+          studentRow.name,
+          studentRow.email,
+          studentRow.email,
+          tempPassword,
+          hostelName,
+          loginUrl,
+        );
+        EmailService.sendEmailAsync({
+          to: studentRow.email,
+          subject: `Your RooMio App Credentials - ${hostelName}`,
+          html,
+        });
+      } catch (e) {
+        // ignore email failure for manual issuance
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          username: studentRow.email,
+          email: studentRow.email,
+          temporaryPassword: tempPassword,
+        },
+      });
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error('Issue student credentials error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to issue credentials' });
+  }
+});
+
+// Get student credentials (only if password is temporary - not changed by student)
+router.get('/:id/credentials', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (currentUser.role !== 'custodian' && currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
+    if (currentUser.role !== 'super_admin' && !hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const { id } = req.params;
+    const studentRes = await pool.query(
+      `SELECT id, email, username, name, hostel_id, password_is_temp 
+       FROM users 
+       WHERE id = $1 AND role = 'user'`,
+      [id]
+    );
+
+    if (studentRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const student = studentRes.rows[0];
+    if (currentUser.role !== 'super_admin' && hostelId && student.hostel_id !== hostelId) {
+      return res.status(403).json({ success: false, message: 'Student not in your hostel' });
+    }
+
+    // Only return credentials if password is temporary (not changed by student)
+    if (!student.password_is_temp) {
+      return res.json({
+        success: true,
+        data: {
+          username: student.email,
+          email: student.email,
+          password: null,
+          message: 'Password has been changed by student. Credentials are no longer visible.',
+          passwordChangedByStudent: true,
+        },
+      });
+    }
+
+    // Try to retrieve stored temporary password
+    const tempPasswordRes = await pool.query(
+      `SELECT temporary_password, created_at 
+       FROM temporary_password_storage 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [student.id]
+    );
+
+    if (tempPasswordRes.rows.length > 0) {
+      return res.json({
+        success: true,
+        data: {
+          username: student.email || student.username,
+          email: student.email,
+          password: tempPasswordRes.rows[0].temporary_password,
+          message: 'Temporary password (not changed by student yet)',
+          passwordChangedByStudent: false,
+          canViewCredentials: true,
+          createdAt: tempPasswordRes.rows[0].created_at,
+        },
+      });
+    }
+
+    // If no stored password found but password_is_temp is true, password was likely changed
+    // but flag wasn't updated, or it's an old record
+    return res.json({
+      success: true,
+      data: {
+        username: student.email || student.username,
+        email: student.email,
+        password: null,
+        message: 'Temporary password exists but not stored. Use "Reset Password" to generate new credentials.',
+        passwordChangedByStudent: false,
+        canViewCredentials: false,
+      },
+    });
+  } catch (e) {
+    console.error('Get student credentials error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to get credentials' });
+  }
+});
+
+// Reset student password (generate new temp password)
+router.post('/:id/reset-password', async (req, res) => {
+  try {
+    const rawAuth = req.headers.authorization || '';
+    const token = rawAuth.startsWith('Bearer ') ? rawAuth.replace('Bearer ', '') : '';
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+    let decoded: any;
+    try {
+      decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    const currentUser = await UserModel.findById(decoded.userId);
+    if (!currentUser) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (currentUser.role !== 'custodian' && currentUser.role !== 'hostel_admin' && currentUser.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const hostelId = await getHostelIdForUser(currentUser.id, currentUser.role);
+    if (currentUser.role !== 'super_admin' && !hostelId) {
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
+
+    const { id } = req.params;
+    const studentRes = await pool.query(
+      `SELECT id, email, name, hostel_id FROM users WHERE id = $1 AND role = 'user'`,
+      [id]
+    );
+
+    if (studentRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const student = studentRes.rows[0];
+    if (currentUser.role !== 'super_admin' && hostelId && student.hostel_id !== hostelId) {
+      return res.status(403).json({ success: false, message: 'Student not in your hostel' });
+    }
+
+    // Generate new temporary password
+    const tempPassword = CredentialGenerator.generatePatternPassword();
+    const hashed = await bcrypt.hash(tempPassword, 10);
+
+    // Update password and mark as temporary
+      const colCheck = await pool.query(
+        `SELECT column_name FROM information_schema.columns 
+         WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`,
+      );
+      if (colCheck.rows.length > 0) {
+        await pool.query(
+          `UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2`,
+          [hashed, student.id],
+        );
+      } else {
+        await pool.query(`UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, [
+          hashed,
+          student.id,
+        ]);
+      }
+
+      // Store temporary password for custodian viewing
+      // Delete any existing entry first
+      await pool.query(
+        `DELETE FROM temporary_password_storage WHERE user_id = $1`,
+        [student.id]
+      );
+      // Insert new temporary password
+      await pool.query(
+        `INSERT INTO temporary_password_storage (user_id, temporary_password, created_by) 
+         VALUES ($1, $2, $3) 
+         ON CONFLICT (user_id) 
+         DO UPDATE SET temporary_password = EXCLUDED.temporary_password, created_at = NOW(), created_by = EXCLUDED.created_by`,
+        [student.id, tempPassword, currentUser.id]
+      );
+
+    // Get hostel name for email
+    let hostelName = 'Hostel';
+    if (student.hostel_id) {
+      const hRes = await pool.query('SELECT name FROM hostels WHERE id = $1', [student.hostel_id]);
+      hostelName = hRes.rows[0]?.name || hostelName;
+    }
+
+    // Send email notification (optional, in background)
+    try {
+      const loginBase = (process.env.FRONTEND_URL || '').trim() || 'http://localhost:3000';
+      const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+      const html = EmailService.generateStudentWelcomeEmail(
+        student.name,
+        student.email,
+        student.email,
+        tempPassword,
+        hostelName,
+        loginUrl,
+      );
+      EmailService.sendEmailAsync({
+        to: student.email,
+        subject: `Your RooMio App Credentials Reset - ${hostelName}`,
+        html,
+      });
+    } catch (e) {
+      // Ignore email failure
+      console.error('Failed to send reset email:', e);
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        username: student.email,
+        email: student.email,
+        temporaryPassword: tempPassword,
+        message: 'Password reset successfully. New credentials generated.',
+      },
+    });
+  } catch (e) {
+    console.error('Reset student password error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to reset password' });
   }
 });
 

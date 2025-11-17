@@ -315,7 +315,7 @@ router.get('/:id', async (req, res) => {
         h.id, h.name, h.address, h.description, h.status, h.total_rooms,
         h.contact_phone, h.contact_email, h.university_id, h.created_at,
         h.is_published, h.latitude, h.longitude, h.booking_fee,
-        h.price_per_room, h.amenities, h.distance_from_campus, h.occupancy_type,
+        h.price_per_room, h.amenities, h.distance_from_campus, h.distance_walk_time, h.occupancy_type,
         u.name as admin_name, u.email as admin_email,
         hs.id as subscription_id, hs.status as subscription_status, hs.start_date, hs.end_date,
         hs.amount_paid, sp.name as plan_name,
@@ -351,6 +351,7 @@ router.get('/:id', async (req, res) => {
       price_per_room: row.price_per_room,
       amenities: row.amenities,
       distance_from_campus: row.distance_from_campus !== null ? Number(row.distance_from_campus) : null,
+      distance_walk_time: row.distance_walk_time || null,
       occupancy_type: row.occupancy_type,
       contact_phone: row.contact_phone,
       contact_email: row.contact_email,
@@ -402,6 +403,7 @@ router.post('/', async (req, res) => {
       status,
       university_id,
       occupancy_type,
+      distance_walk_time,
       subscription_plan_id,
       admin_name,
       admin_email,
@@ -455,7 +457,8 @@ router.post('/', async (req, res) => {
           contact_email,
           status: status || 'active',
           university_id,
-          occupancy_type
+          occupancy_type,
+          distance_walk_time
         }),
         bcrypt.hash(temporaryPassword, 10)
       ]);

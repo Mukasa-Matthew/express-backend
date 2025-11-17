@@ -81,7 +81,7 @@ router.get('/hostels', async (req, res) => {
           h.id as hostel_id,
           COUNT(DISTINCT CASE 
             WHEN r.id IS NOT NULL AND r.status = 'available' 
-            AND (r.capacity - COALESCE(occupant_count.current_occupants, 0)) > 0 
+            AND (r.capacity - COALESCE(occupant_count.current_occupants, 0) - COALESCE(pending_bookings.pending_bookings_count, 0) - COALESCE(reservations.reservations_count, 0)) > 0 
             THEN r.id 
           END) as available_rooms_count
         FROM hostels h
@@ -99,6 +99,19 @@ router.get('/hostels', async (req, res) => {
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) occupant_count ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) as pending_bookings_count
+          FROM public_hostel_bookings pb
+          WHERE pb.room_id = r.id
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
+        ) pending_bookings ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) as reservations_count
+          FROM room_reservations rr
+          WHERE rr.room_id = r.id
+            AND rr.status IN ('active', 'confirmed')
+        ) reservations ON true
         GROUP BY h.id
       )
       SELECT
@@ -113,6 +126,7 @@ router.get('/hostels', async (req, res) => {
         h.price_per_room,
         h.occupancy_type,
         h.distance_from_campus,
+        h.distance_walk_time,
         h.amenities,
         h.latitude,
         h.longitude,
@@ -194,7 +208,7 @@ router.get('/hostels', async (req, res) => {
           h.id as hostel_id,
           COUNT(DISTINCT CASE 
             WHEN r.id IS NOT NULL AND r.status = 'available' 
-            AND (r.capacity - COALESCE(occupant_count.current_occupants, 0)) > 0 
+            AND (r.capacity - COALESCE(occupant_count.current_occupants, 0) - COALESCE(pending_bookings.pending_bookings_count, 0) - COALESCE(reservations.reservations_count, 0)) > 0 
             THEN r.id 
           END) as available_rooms_count
         FROM hostels h
@@ -266,6 +280,7 @@ router.get('/hostels/:id', async (req, res) => {
         h.booking_fee,
         h.occupancy_type,
         h.distance_from_campus,
+        h.distance_walk_time,
         h.amenities,
         h.rules_and_regulations,
         h.latitude,
@@ -350,7 +365,9 @@ router.get('/hostels/:id', async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS booking_count
           FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+          WHERE pb.room_id = r.id 
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
         ) pending_bookings ON TRUE
       `
       : `
@@ -535,7 +552,9 @@ router.get('/universities-with-hostels', async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS booking_count
           FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+          WHERE pb.room_id = r.id 
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
         ) pending_bookings ON TRUE
       `
       : `
@@ -608,6 +627,7 @@ router.get('/universities-with-hostels', async (req, res) => {
               'booking_fee', h.booking_fee,
               'amenities', h.amenities,
               'distance_from_campus', h.distance_from_campus,
+              'distance_walk_time', h.distance_walk_time,
               'occupancy_type', h.occupancy_type,
               'latitude', h.latitude,
               'longitude', h.longitude,
@@ -677,7 +697,9 @@ router.get('/universities/:id/hostels', async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS booking_count
           FROM public_hostel_bookings pb
-          WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+          WHERE pb.room_id = r.id 
+            AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
         ) pending_bookings ON TRUE
       `
       : `
@@ -749,6 +771,7 @@ router.get('/universities/:id/hostels', async (req, res) => {
         h.booking_fee,
         h.amenities,
         h.distance_from_campus,
+        h.distance_walk_time,
         h.occupancy_type,
         h.latitude,
         h.longitude,
@@ -973,9 +996,9 @@ router.post('/hostels/:id/bookings', async (req, res) => {
     );
 
     const occupancy = occupancyCheck.rows[0];
-    const occupied = Number(occupancy.pending_bookings ?? 0) + Number(occupancy.active_assignments ?? 0);
+    const occupied = Number(occupancy.pending_bookings ?? 0) + Number(occupancy.active_assignments ?? 0) + Number(occupancy.reserved_spaces ?? 0);
     if (occupied >= roomCapacity) {
-      return res.status(409).json({ success: false, message: 'Selected room is already fully booked' });
+      return res.status(409).json({ success: false, message: 'Selected room is already fully booked or reserved' });
     }
 
     const reference = `RM-${hostelId}-${Date.now()}`;
@@ -1086,8 +1109,16 @@ router.post('/hostels/:id/bookings', async (req, res) => {
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS booking_count
         FROM public_hostel_bookings pb
-        WHERE pb.room_id = r.id AND pb.status IN ('pending', 'booked', 'checked_in')
+        WHERE pb.room_id = r.id 
+          AND pb.status IN ('pending', 'booked', 'checked_in')
+          AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
       ) pending_bookings ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS reservation_count
+        FROM room_reservations rr
+        WHERE rr.room_id = r.id
+          AND rr.status IN ('active', 'confirmed')
+      ) reservations ON TRUE
       WHERE r.hostel_id = $1
     `;
 

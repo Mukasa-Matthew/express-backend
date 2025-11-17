@@ -9,6 +9,7 @@
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate": "ts-node src/database/migrations.ts",
+    "reset-migration": "ts-node src/database/reset-migration.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",

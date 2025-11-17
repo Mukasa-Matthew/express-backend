@@ -15,6 +15,7 @@ export interface Hostel {
   university_id?: number | null;
   region_id?: number | null;
   distance_from_campus?: number | null;
+  distance_walk_time?: string | null;
   amenities?: string | null;
   price_per_room?: number | null;
   rules_and_regulations?: string | null;
@@ -36,10 +37,11 @@ export interface CreateHostelData {
   status?: 'active' | 'inactive' | 'maintenance' | 'suspended';
   university_id?: number;
   region_id?: number;
-  occupancy_type?: 'male' | 'female' | 'mixed';
+  occupancy_type?: 'male' | 'female' | 'mixed' | null;
   amenities?: string;
   price_per_room?: number;
   distance_from_campus?: number;
+  distance_walk_time?: string;
   booking_fee?: number;
 }
 
@@ -69,6 +71,7 @@ function prismaHostelToHostel(prismaHostel: PrismaHostel): Hostel {
       prismaHostel.distanceFromCampus !== null && prismaHostel.distanceFromCampus !== undefined
         ? Number(prismaHostel.distanceFromCampus)
         : null,
+    distance_walk_time: prismaHostel.distanceWalkTime || null,
     amenities: prismaHostel.amenities,
     price_per_room: prismaHostel.pricePerRoom,
     rules_and_regulations: prismaHostel.rulesAndRegulations,
@@ -99,6 +102,7 @@ export class HostelModel {
       amenities,
       price_per_room,
       distance_from_campus,
+      distance_walk_time,
       booking_fee,
     } = hostelData;
 
@@ -120,6 +124,7 @@ export class HostelModel {
           distance_from_campus !== undefined && distance_from_campus !== null
             ? new Prisma.Decimal(distance_from_campus)
             : null,
+        distanceWalkTime: distance_walk_time || null,
         bookingFee:
           booking_fee !== undefined && booking_fee !== null
             ? Math.round(Number(booking_fee))
@@ -182,6 +187,7 @@ export class HostelModel {
           ? new Prisma.Decimal(hostelData.distance_from_campus)
           : null;
     }
+    if (hostelData.distance_walk_time !== undefined) prismaUpdateData.distanceWalkTime = hostelData.distance_walk_time || null;
     if (hostelData.booking_fee !== undefined) {
       prismaUpdateData.bookingFee =
         hostelData.booking_fee !== null && hostelData.booking_fee !== undefined

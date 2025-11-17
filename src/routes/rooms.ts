@@ -106,11 +106,13 @@ router.get('/available', async (req, res) => {
 
     let bookingsSemesterFilter = '';
     let assignmentsSemesterFilter = '';
+    let reservationsSemesterFilter = '';
 
     if (semesterId) {
       params.push(semesterId);
       bookingsSemesterFilter = `AND pb.semester_id = $${nextIndex}`;
       assignmentsSemesterFilter = `AND (sra.semester_id = $${nextIndex} OR sra.semester_id IS NULL)`;
+      reservationsSemesterFilter = `AND rr.reserved_for_semester_id = $${nextIndex}`;
       nextIndex += 1;
     }
 
@@ -121,8 +123,16 @@ router.get('/available', async (req, res) => {
           FROM public_hostel_bookings pb
           WHERE pb.room_id = r.id
             AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
             ${bookingsSemesterFilter}
         ) pending_bookings ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS reservation_count
+          FROM room_reservations rr
+          WHERE rr.room_id = r.id
+            AND rr.status IN ('active', 'confirmed')
+            ${reservationsSemesterFilter}
+        ) reservations ON true
       `
       : `
         LEFT JOIN LATERAL (
@@ -136,8 +146,9 @@ router.get('/available', async (req, res) => {
           r.*,
           COALESCE(active_assignments.active_count, 0) AS current_occupants,
           COALESCE(pending_bookings.booking_count, 0) AS pending_bookings,
+          COALESCE(reservations.reservation_count, 0) AS reserved_spaces,
           r.capacity,
-          (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) AS available_spaces
+          (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0) - COALESCE(reservations.reservation_count, 0)) AS available_spaces
         FROM rooms r
         LEFT JOIN LATERAL (
           SELECT COUNT(DISTINCT sra.user_id) AS active_count
@@ -156,7 +167,7 @@ router.get('/available', async (req, res) => {
         ${pendingBookingsJoin}
         WHERE r.hostel_id = $1
           AND r.status = 'available'
-          AND (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0)) > 0
+          AND (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0) - COALESCE(reservations.reservation_count, 0)) > 0
         ORDER BY r.room_number
       `,
       params,

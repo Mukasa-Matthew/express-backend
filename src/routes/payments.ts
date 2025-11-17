@@ -3,6 +3,8 @@ import pool from '../config/database';
 import { UserModel } from '../models/User';
 import { EmailService } from '../services/emailService';
 import { requireActiveSemester } from '../utils/semesterMiddleware';
+import bcrypt from 'bcryptjs';
+import { CredentialGenerator } from '../utils/credentialGenerator';
 
 const router = express.Router();
 
@@ -313,14 +315,77 @@ router.post('/', async (req: Request, res) => {
       roomQuery += ` AND sra.semester_id = $${roomParamIndex++}`;
       roomParams.push(semesterCheck.semesterId);
     }
+    const orderDateCol = sraInfo.assignmentDateColumn
+      ? `sra.${sraInfo.assignmentDateColumn}`
+      : (sraInfo.createdAtColumn ? `sra.${sraInfo.createdAtColumn}` : 'sra.id');
     roomQuery += `
-      ORDER BY sra.assignment_date DESC NULLS LAST, sra.id DESC
+      ORDER BY ${orderDateCol} DESC NULLS LAST, sra.id DESC
       LIMIT 1
     `;
 
-    const roomRes = await client.query(roomQuery, roomParams);
-    const room = roomRes.rows[0] || null;
-    const expectedPrice = room?.expected_price != null ? parseFloat(room.expected_price) : null;
+    let roomRes = await client.query(roomQuery, roomParams);
+    let room = roomRes.rows[0] || null;
+    let expectedPrice = room?.expected_price != null ? parseFloat(room.expected_price) : null;
+
+    // If no active assignment/expected price, try to resolve from an online booking by student's email
+    if (expectedPrice == null) {
+      const bookingLookup = await client.query(
+        `SELECT b.id, b.room_id, b.semester_id
+         FROM public_hostel_bookings b
+         JOIN users u ON LOWER(u.email) = LOWER(b.student_email)
+         WHERE u.id = $1 AND b.hostel_id = $2
+           ${semesterCheck.semesterId != null ? 'AND b.semester_id = $3' : ''}
+           AND b.status IN ('booked','pending')
+         ORDER BY b.created_at DESC
+         LIMIT 1`,
+        semesterCheck.semesterId != null ? [user_id, hostelId, semesterCheck.semesterId] : [user_id, hostelId]
+      );
+      const bookingRow = bookingLookup.rows[0];
+      if (bookingRow) {
+        // Determine room expected price
+        const roomPriceRes = await client.query(`SELECT price FROM rooms WHERE id = $1 AND hostel_id = $2`, [
+          bookingRow.room_id,
+          hostelId,
+        ]);
+        const rp = roomPriceRes.rows[0]?.price;
+        if (rp != null) {
+          expectedPrice = Number(rp);
+        }
+        // Create enrollment if missing
+        await client.query(
+          `INSERT INTO semester_enrollments (
+            user_id, semester_id, room_id, enrollment_status,
+            total_amount, amount_paid, balance, enrollment_date, created_at, updated_at
+          ) VALUES ($1, $2, $3, 'active', $4::numeric, 0::numeric, $4::numeric, NOW(), NOW(), NOW())
+          ON CONFLICT (user_id, semester_id) DO NOTHING`,
+          [user_id, bookingRow.semester_id, bookingRow.room_id, expectedPrice ?? 0]
+        );
+        // Create active assignment if not present
+        const sraCols = await getStudentRoomAssignmentInfo();
+        const sraUserCol = sraCols.userIdColumn;
+        const existingAssignment = await client.query(
+          `SELECT id FROM student_room_assignments
+           WHERE ${sraUserCol} = $1 AND room_id = $2 AND ${sraCols.hasSemesterColumn ? 'semester_id = $3 AND' : ''} status = 'active'
+           LIMIT 1`,
+          sraCols.hasSemesterColumn ? [user_id, bookingRow.room_id, bookingRow.semester_id] : [user_id, bookingRow.room_id]
+        );
+        if (existingAssignment.rowCount === 0) {
+          await client.query(
+            `INSERT INTO student_room_assignments (${sraUserCol}, room_id, ${sraCols.hasSemesterColumn ? 'semester_id,' : ''} assigned_by, ${sraCols.assignmentDateColumn ?? 'assigned_at'}, status, created_at, updated_at)
+             VALUES ($1, $2, ${sraCols.hasSemesterColumn ? '$3,' : ''} $${sraCols.hasSemesterColumn ? 4 : 3}, NOW(), 'active', NOW(), NOW())`,
+            sraCols.hasSemesterColumn ? [user_id, bookingRow.room_id, bookingRow.semester_id, currentUser.id] : [user_id, bookingRow.room_id, currentUser.id]
+          );
+        }
+        // refresh room expected info
+        roomRes = await client.query(
+          `SELECT rm.room_number, ${roomExpectedPriceExpr} AS expected_price
+           FROM rooms rm WHERE rm.id = $1`,
+          [bookingRow.room_id]
+        );
+        room = roomRes.rows[0] || null;
+        expectedPrice = room?.expected_price != null ? parseFloat(room.expected_price) : expectedPrice;
+      }
+    }
 
     const sumBeforeParams: any[] = [user_id];
     let sumBeforeQuery = `SELECT COALESCE(SUM(amount),0) as total_paid FROM payments WHERE ${paymentInfo.userIdColumn} = $1`;
@@ -410,6 +475,34 @@ router.post('/', async (req: Request, res) => {
     const expected = room?.expected_price != null ? Math.round(room.expected_price) : null;
     const balanceAfter = expected != null ? Math.max(expected - totalPaidAfter, 0) : null;
 
+    // Update semester enrollment totals (amount_paid, balance) when possible
+    try {
+      if (semesterCheck.semesterId != null) {
+        // Ensure enrollment exists
+        await client.query(
+          `INSERT INTO semester_enrollments (
+            user_id, semester_id, room_id, enrollment_status,
+            total_amount, amount_paid, balance, enrollment_date, created_at, updated_at
+          ) VALUES ($1, $2, NULL, 'active', COALESCE($3::numeric, 0), $4::numeric, GREATEST(COALESCE($3::numeric,0) - $4::numeric, 0), NOW(), NOW(), NOW())
+          ON CONFLICT (user_id, semester_id) DO NOTHING`,
+          [user_id, semesterCheck.semesterId, expectedPrice ?? 0, totalPaidAfter]
+        );
+
+        // Update totals
+        await client.query(
+          `UPDATE semester_enrollments
+           SET amount_paid = $3::numeric,
+               balance = GREATEST(COALESCE(total_amount, 0)::numeric - $3::numeric, 0),
+               enrollment_status = 'active',
+               updated_at = NOW()
+           WHERE user_id = $1 AND semester_id = $2`,
+          [user_id, semesterCheck.semesterId, totalPaidAfter]
+        );
+      }
+    } catch (enrollErr) {
+      console.warn('Semester enrollment totals update failed:', (enrollErr as any)?.message || enrollErr);
+    }
+
     await client.query('COMMIT');
 
     // Invalidate cached summary for this hostel
@@ -439,8 +532,119 @@ router.post('/', async (req: Request, res) => {
     // Send receipt
     await EmailService.sendEmail({ to: s.email, subject: 'Payment Receipt - LTS Portal', html });
 
+    // If this is the student's first payment ever, generate/send credentials
+    if (totalPaidBefore === 0) {
+      try {
+        const tempPassword = CredentialGenerator.generatePatternPassword();
+        const hashed = await bcrypt.hash(tempPassword, 10);
+
+        // Update password and mark as temporary if column exists
+        const colCheck = await pool.query(
+          `SELECT column_name 
+           FROM information_schema.columns 
+           WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`
+        );
+        if (colCheck.rows.length > 0) {
+          await pool.query(
+            'UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2',
+            [hashed, user_id]
+          );
+        } else {
+          await pool.query(
+            'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
+            [hashed, user_id]
+          );
+        }
+
+        const loginBase = process.env.FRONTEND_URL?.trim() || 'http://localhost:3000';
+        const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+        const welcomeHtml = EmailService.generateStudentWelcomeEmail(
+          s.name,
+          s.email,
+          s.email,
+          tempPassword,
+          hostelName || 'Our Hostel',
+          loginUrl
+        );
+        await EmailService.sendEmail({
+          to: s.email,
+          subject: `Welcome to ${hostelName || 'Our Hostel'} - Your Student Account`,
+          html: welcomeHtml,
+        });
+      } catch (credsErr) {
+        console.warn('First-payment credentials email failed (non-blocking):', (credsErr as any)?.message || credsErr);
+      }
+    }
+
+    // If fully paid now, ensure credentials exist (without resetting existing passwords)
+    if (expected != null && balanceAfter != null && balanceAfter <= 0) {
+      try {
+        // Check if user has a password; if missing, create temp credentials
+        const userRes = await pool.query(
+          `SELECT password, 
+                  (SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='password_is_temp' LIMIT 1) IS NOT NULL AS has_temp_col,
+                  COALESCE(password_is_temp, false) AS password_is_temp
+           FROM users WHERE id = $1`,
+          [user_id]
+        );
+        const row = userRes.rows[0];
+        const hasPassword = row && typeof row.password === 'string' && row.password.length > 0;
+        const canMarkTemp = row?.has_temp_col === true;
+        const isTemp = row?.password_is_temp === true;
+
+        if (!hasPassword) {
+          const tempPassword = CredentialGenerator.generatePatternPassword();
+          const hashed = await bcrypt.hash(tempPassword, 10);
+          if (canMarkTemp) {
+            await pool.query(
+              'UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2',
+              [hashed, user_id]
+            );
+          } else {
+            await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashed, user_id]);
+          }
+
+          const loginBase = process.env.FRONTEND_URL?.trim() || 'http://localhost:3000';
+          const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+          const welcomeHtml = EmailService.generateStudentWelcomeEmail(
+            s.name,
+            s.email,
+            s.email,
+            tempPassword,
+            hostelName || 'Our Hostel',
+            loginUrl
+          );
+          await EmailService.sendEmail({
+            to: s.email,
+            subject: `Welcome to ${hostelName || 'Our Hostel'} - Your Student Account`,
+            html: welcomeHtml,
+          });
+        }
+      } catch (credEnsureErr) {
+        console.warn('Ensure credentials on full payment failed (non-blocking):', (credEnsureErr as any)?.message || credEnsureErr);
+      }
+    }
+
     // If fully paid now, send thank you & welcome email
     if (expected != null && balanceAfter != null && balanceAfter <= 0) {
+      // Update enrollment to reflect fully paid and active
+      try {
+        await client.query(
+          `UPDATE semester_enrollments
+           SET amount_paid = $1::numeric,
+               balance = GREATEST($2::numeric, 0),
+               enrollment_status = 'active',
+               updated_at = NOW()
+           WHERE user_id = $3
+             ${semesterCheck.semesterId != null ? 'AND semester_id = $4' : ''}`,
+          semesterCheck.semesterId != null
+            ? [totalPaidAfter, Math.max((expected ?? 0) - totalPaidAfter, 0), user_id, semesterCheck.semesterId]
+            : [totalPaidAfter, Math.max((expected ?? 0) - totalPaidAfter, 0), user_id]
+        );
+      } catch (e) {
+        console.warn('Failed to update enrollment amounts (non-blocking):', (e as any)?.message || e);
+      }
+
       // Fetch student profile for access_number
       // Check if student_profiles table exists, otherwise use students table
       const studentProfilesCheck = await client.query(`
@@ -473,6 +677,49 @@ router.post('/', async (req: Request, res) => {
         subject: `Thank You & Welcome to ${hostelName}! - All Balance Paid`, 
         html: thankYouHtml 
       });
+
+      // If this payment transitioned the student to fully-paid (i.e., before < expected and after >= expected)
+      if (expected != null && totalPaidBefore < expected) {
+        try {
+          // Generate fresh app credentials and email them for mobile login
+          const tempPassword = CredentialGenerator.generatePatternPassword();
+          const hashed = await bcrypt.hash(tempPassword, 10);
+
+          // Update password and mark as temporary if supported
+          const colCheck = await pool.query(
+            `SELECT column_name 
+             FROM information_schema.columns 
+             WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`
+          );
+          if (colCheck.rows.length > 0) {
+            await pool.query(
+              'UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2',
+              [hashed, user_id]
+            );
+          } else {
+            await pool.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [hashed, user_id]);
+          }
+
+          const loginBase = process.env.FRONTEND_URL?.trim() || 'http://localhost:3000';
+          const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+
+          const credsHtml = EmailService.generateStudentWelcomeEmail(
+            s.name,
+            s.email,
+            s.email,
+            tempPassword,
+            hostelName || 'Our Hostel',
+            loginUrl
+          );
+          await EmailService.sendEmail({
+            to: s.email,
+            subject: `Your RooMio App Credentials - ${hostelName || 'Our Hostel'}`,
+            html: credsHtml,
+          });
+        } catch (credsErr) {
+          console.warn('Fully-paid credentials email failed (non-blocking):', (credsErr as any)?.message || credsErr);
+        }
+      }
     }
 
     res.status(201).json({ success: true, message: 'Payment recorded and receipt sent', data: { total_paid: totalPaidAfter, expected, balance_after: balanceAfter } });
@@ -811,7 +1058,36 @@ router.get('/summary', async (req, res) => {
     // and the duplicate payment created during check-in is excluded from ledgerCollected
     // IMPORTANT: We use bookingPaymentsTotal (from public_booking_payments) NOT bookingsAmountPaid (from public_hostel_bookings.amount_paid)
     // because bookingPaymentsTotal represents actual payment records, while amount_paid might include estimates or incorrect values
-    const total_collected = (ledgerCollected - checkedInBookingPaymentsInLedger) + bookingPaymentsTotal;
+    // Include online booking fees that exist in bookings table but missing in public_booking_payments (edge/legacy)
+    const onlineBookingFeesQuery2 = semesterId
+      ? `
+        SELECT 
+          COALESCE(SUM(b.amount_paid), 0)::numeric - 
+          COALESCE(SUM(pbp.amount), 0)::numeric AS total
+        FROM public_hostel_bookings b
+        LEFT JOIN public_booking_payments pbp ON pbp.booking_id = b.id AND pbp.status = 'completed'
+        WHERE b.hostel_id = $1
+          AND b.semester_id = $2
+          AND b.source = 'online'
+          AND b.amount_paid > 0
+          AND (pbp.id IS NULL OR pbp.amount IS NULL)
+      `
+      : `
+        SELECT 
+          COALESCE(SUM(b.amount_paid), 0)::numeric - 
+          COALESCE(SUM(pbp.amount), 0)::numeric AS total
+        FROM public_hostel_bookings b
+        LEFT JOIN public_booking_payments pbp ON pbp.booking_id = b.id AND pbp.status = 'completed'
+        WHERE b.hostel_id = $1
+          AND b.source = 'online'
+          AND b.amount_paid > 0
+          AND (pbp.id IS NULL OR pbp.amount IS NULL)
+      `;
+    const onlineBookingFeesParams2 = semesterId ? [hostelId, semesterId] : [hostelId];
+    const onlineFeesRes2 = await pool.query(onlineBookingFeesQuery2, onlineBookingFeesParams2);
+    const onlineBookingFeesTotal2 = Math.max(0, parseFloat(onlineFeesRes2.rows[0]?.total || '0'));
+
+    const total_collected = (ledgerCollected - checkedInBookingPaymentsInLedger) + bookingPaymentsTotal + onlineBookingFeesTotal2;
     
     // Log for debugging (can be removed later)
     console.log(`[Payments Summary] Hostel ${hostelId}, Semester ${semesterId || 'all'}:`);

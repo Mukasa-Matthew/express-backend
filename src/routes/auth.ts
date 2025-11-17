@@ -100,16 +100,41 @@ router.post('/login', async (req, res) => {
     }
 
     // Need to get user with password and password_is_temp field
-    const userByEmail = await pool.query(
-      'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(email) = LOWER($1)',
-      [identifier]
-    );
-    const userByUsername = userByEmail.rows.length === 0 
-      ? await pool.query(
-          'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(username) = LOWER($1)',
+    // Add retry logic for connection timeouts
+    let userByEmail: any;
+    let userByUsername: any;
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (retryCount < maxRetries) {
+      try {
+        userByEmail = await pool.query(
+          'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(email) = LOWER($1)',
           [identifier]
-        )
-      : { rows: [] };
+        );
+        userByUsername = userByEmail.rows.length === 0 
+          ? await pool.query(
+              'SELECT id, email, username, name, password, role, hostel_id, password_is_temp, profile_picture FROM users WHERE LOWER(username) = LOWER($1)',
+              [identifier]
+            )
+          : { rows: [] };
+        break; // Success, exit retry loop
+      } catch (dbError: any) {
+        retryCount++;
+        const isConnectionError = dbError.message?.includes('Connection terminated') || 
+                                  dbError.message?.includes('timeout') ||
+                                  dbError.code === 'ECONNRESET' ||
+                                  dbError.code === 'ETIMEDOUT';
+        
+        if (isConnectionError && retryCount < maxRetries) {
+          console.log(`[Login] Database connection error (attempt ${retryCount}/${maxRetries}), retrying...`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // Exponential backoff
+          continue;
+        }
+        // If not a connection error or max retries reached, throw
+        throw dbError;
+      }
+    }
     
     const userRow = userByEmail.rows[0] || userByUsername.rows[0];
     if (!userRow) {
@@ -219,6 +244,113 @@ router.post('/login', async (req, res) => {
           message: 'This hostel has no active subscription. Please contact the Super Admin to subscribe.',
           code: 'SUBSCRIPTION_MISSING'
         });
+      }
+    }
+
+    // For students (role='user'), check semester enrollment status
+    if (user.role === 'user') {
+      const now = new Date();
+      
+      // Check for active enrollment in current or upcoming semester
+      const enrollmentCheck = await pool.query(
+        `
+        SELECT 
+          se.id,
+          se.semester_id,
+          se.enrollment_status,
+          s.id as semester_id,
+          s.name as semester_name,
+          s.start_date,
+          s.end_date,
+          s.status as semester_status,
+          s.is_current,
+          s.hostel_id,
+          h.name as hostel_name
+        FROM semester_enrollments se
+        JOIN semesters s ON s.id = se.semester_id
+        JOIN hostels h ON h.id = s.hostel_id
+        WHERE se.user_id = $1
+          AND se.enrollment_status = 'active'
+          AND (s.status = 'active' OR s.status = 'upcoming')
+          AND (s.is_current = true OR s.start_date >= $2)
+        ORDER BY s.start_date DESC
+        LIMIT 1
+        `,
+        [user.id, now]
+      );
+
+      // Check for active room reservation (rebooking for next semester)
+      const reservationCheck = await pool.query(
+        `
+        SELECT 
+          rr.id,
+          rr.status,
+          rr.reserved_for_semester_id,
+          s.start_date,
+          s.end_date,
+          s.status as semester_status,
+          h.id as hostel_id,
+          h.name as hostel_name
+        FROM room_reservations rr
+        JOIN semesters s ON s.id = rr.reserved_for_semester_id
+        JOIN rooms r ON r.id = rr.room_id
+        JOIN hostels h ON h.id = r.hostel_id
+        WHERE rr.user_id = $1
+          AND rr.status IN ('active', 'confirmed')
+          AND (s.status = 'active' OR s.status = 'upcoming')
+        ORDER BY s.start_date DESC
+        LIMIT 1
+        `,
+        [user.id]
+      );
+
+      const hasActiveEnrollment = enrollmentCheck.rows.length > 0;
+      const hasActiveReservation = reservationCheck.rows.length > 0;
+
+      if (!hasActiveEnrollment && !hasActiveReservation) {
+        // Check if there's a past enrollment to provide helpful message
+        const pastEnrollment = await pool.query(
+          `
+          SELECT 
+            s.name as semester_name,
+            s.end_date,
+            h.name as hostel_name
+          FROM semester_enrollments se
+          JOIN semesters s ON s.id = se.semester_id
+          JOIN hostels h ON h.id = s.hostel_id
+          WHERE se.user_id = $1
+            AND se.enrollment_status = 'active'
+          ORDER BY s.end_date DESC
+          LIMIT 1
+          `,
+          [user.id]
+        );
+
+        if (pastEnrollment.rows.length > 0) {
+          const past = pastEnrollment.rows[0];
+          const endDate = new Date(past.end_date);
+          if (endDate < now) {
+            return res.status(403).json({
+              success: false,
+              message: `Your enrollment for ${past.semester_name} at ${past.hostel_name} has ended. Please rebook your room for the next semester or contact your hostel administrator.`,
+              code: 'SEMESTER_ENDED',
+              requiresRebooking: true
+            });
+          }
+        }
+
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have an active enrollment or reservation. Please contact your hostel administrator to register for the current semester.',
+          code: 'NO_ACTIVE_ENROLLMENT'
+        });
+      }
+
+      // Update hostel_id from active enrollment or reservation
+      if (hasActiveEnrollment) {
+        hostelId = enrollmentCheck.rows[0].hostel_id;
+      } else if (hasActiveReservation) {
+        hostelId = reservationCheck.rows[0].hostel_id;
       }
     }
 
@@ -351,7 +483,10 @@ router.post('/logout', (req, res) => {
 // Change password
 router.post('/change-password', async (req, res) => {
   try {
-    const { currentPassword, newPassword, isTemporaryPassword } = req.body;
+    // Accept both camelCase and snake_case from various clients
+    const currentPassword = req.body.currentPassword ?? req.body.current_password;
+    const newPassword = req.body.newPassword ?? req.body.new_password;
+    const isTemporaryPassword = req.body.isTemporaryPassword ?? req.body.is_temporary_password;
     const token = req.headers.authorization?.replace('Bearer ', '');
     
     if (!token) {
@@ -431,6 +566,8 @@ router.post('/change-password', async (req, res) => {
 
     // Mark password as permanent and clear any stored temporary credentials
     await pool.query('UPDATE users SET password_is_temp = FALSE WHERE id = $1', [decoded.userId]);
+    // Delete stored temporary password so custodians can no longer view it
+    await pool.query('DELETE FROM temporary_password_storage WHERE user_id = $1', [decoded.userId]);
     
     // Log password change
     const { AuditLogger } = require('../utils/auditLogger');

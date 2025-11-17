@@ -62,6 +62,7 @@ model Hostel {
   pricePerRoom          Int?      @map("price_per_room")
   occupancyType         String?   @map("occupancy_type") @db.VarChar(10)
   distanceFromCampus    Decimal?  @map("distance_from_campus") @db.Decimal(5, 2)
+  distanceWalkTime      String?   @map("distance_walk_time") @db.VarChar(50)
   amenities             String?   @db.Text
   rulesAndRegulations   String?   @map("rules_and_regulations") @db.Text
   isPublished           Boolean   @default(false) @map("is_published")
@@ -84,6 +85,7 @@ model Hostel {
   images          HostelImage[]
   publicBookings  PublicHostelBooking[]
   currentSubscription HostelSubscription? @relation("HostelCurrentSubscription", fields: [currentSubscriptionId], references: [id])
+  announcements   Announcement[]
   
   @@index([isPublished], map: "idx_hostels_is_published")
   @@index([currentSubscriptionId], map: "idx_hostels_current_subscription_id")
@@ -120,6 +122,9 @@ model User {
   recordedPayments Payment[] @relation("PaymentRecorder")
   publicBookingsCreated PublicHostelBooking[] @relation("PublicBookingsCreatedBy")
   recordedPublicBookingPayments PublicBookingPayment[] @relation("PublicBookingPaymentRecorder")
+  roomReservations      RoomReservation[] @relation("RoomReservations")
+  notifications         Notification[]
+  createdAnnouncements Announcement[] @relation("AnnouncementCreator")
   
   @@index([email], map: "idx_users_email")
   @@index([username], map: "idx_users_username")
@@ -145,6 +150,7 @@ model Room {
   assignments     StudentRoomAssignment[]
   semesterEnrollments SemesterEnrollment[]
   publicBookings  PublicHostelBooking[] @relation("PublicBookingsRoom")
+  reservations    RoomReservation[] @relation("RoomReservations")
   
   @@unique([hostelId, roomNumber])
   @@map("rooms")
@@ -220,6 +226,8 @@ model Semester {
   assignments     StudentRoomAssignment[]
   payments        Payment[]
   publicBookings  PublicHostelBooking[] @relation("PublicBookingsSemester")
+  currentReservations RoomReservation[] @relation("CurrentSemesterReservations")
+  reservedForReservations RoomReservation[] @relation("ReservedForSemesterReservations")
   
   @@map("semesters")
 }
@@ -456,6 +464,34 @@ model PublicBookingPayment {
   @@map("public_booking_payments")
 }
 
+// Room Reservations table (for next semester reservations)
+model RoomReservation {
+  id                    Int       @id @default(autoincrement())
+  userId                Int       @map("user_id")
+  roomId                Int       @map("room_id")
+  currentSemesterId     Int       @map("current_semester_id")
+  reservedForSemesterId Int       @map("reserved_for_semester_id")
+  status                String    @default("active") @db.VarChar(50)
+  reservationDate       DateTime  @default(now()) @map("reservation_date")
+  confirmedAt           DateTime? @map("confirmed_at")
+  expiresAt             DateTime? @map("expires_at")
+  notes                 String?   @db.Text
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  
+  user                  User      @relation("RoomReservations", fields: [userId], references: [id], onDelete: Cascade)
+  room                  Room      @relation("RoomReservations", fields: [roomId], references: [id], onDelete: Cascade)
+  currentSemester       Semester  @relation("CurrentSemesterReservations", fields: [currentSemesterId], references: [id], onDelete: Cascade)
+  reservedForSemester   Semester  @relation("ReservedForSemesterReservations", fields: [reservedForSemesterId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, reservedForSemesterId, roomId])
+  @@index([userId], map: "idx_room_reservations_user_id")
+  @@index([roomId], map: "idx_room_reservations_room_id")
+  @@index([reservedForSemesterId], map: "idx_room_reservations_reserved_semester")
+  @@index([status], map: "idx_room_reservations_status")
+  @@map("room_reservations")
+}
+
 // Audit Logs table
 model AuditLog {
   id          Int       @id @default(autoincrement())
@@ -584,3 +620,48 @@ model PasswordHistory {
   
   @@map("password_history")
 }
+// Announcements table
+model Announcement {
+  id          Int       @id @default(autoincrement())
+  hostelId    Int       @map("hostel_id")
+  title       String    @db.VarChar(255)
+  content     String    @db.Text
+  priority    String    @default("normal") @db.VarChar(20) // low, normal, high, urgent
+  isActive    Boolean   @default(true) @map("is_active")
+  publishedAt DateTime? @map("published_at")
+  expiresAt   DateTime? @map("expires_at")
+  createdBy   Int?      @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  hostel      Hostel    @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  creator     User?     @relation("AnnouncementCreator", fields: [createdBy], references: [id])
+  
+  @@index([hostelId], map: "idx_announcements_hostel_id")
+  @@index([isActive], map: "idx_announcements_is_active")
+  @@index([publishedAt], map: "idx_announcements_published_at")
+  @@map("announcements")
+}
+
+// Notifications table
+model Notification {
+  id          Int       @id @default(autoincrement())
+  userId      Int       @map("user_id")
+  type        String    @db.VarChar(50) // payment_reminder, booking_update, announcement, etc.
+  title       String    @db.VarChar(255)
+  message     String    @db.Text
+  isRead      Boolean   @default(false) @map("is_read")
+  readAt      DateTime? @map("read_at")
+  link        String?   @db.VarChar(500) // Optional link to related resource
+  metadata    Json?     // Additional data (e.g., payment_id, booking_id)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId], map: "idx_notifications_user_id")
+  @@index([isRead], map: "idx_notifications_is_read")
+  @@index([type], map: "idx_notifications_type")
+  @@index([createdAt], map: "idx_notifications_created_at")
+  @@map("notifications")
+}
+

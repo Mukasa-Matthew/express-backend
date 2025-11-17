@@ -60,6 +60,25 @@ async function getAppliedMigrations(): Promise<string[]> {
 }
 
 /**
+ * Check if a table exists in the database
+ */
+async function tableExists(tableName: string): Promise<boolean> {
+  try {
+    const result = await pool.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = $1
+      )`,
+      [tableName]
+    );
+    return result.rows[0].exists;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run a single migration file
  */
 async function runMigration(migrationPath: string): Promise<void> {
@@ -69,10 +88,31 @@ async function runMigration(migrationPath: string): Promise<void> {
   console.log(`   🔄 Running migration: ${migrationName}`);
   
   try {
-    // Check if already applied
-    if (await isMigrationApplied(migrationName)) {
-      console.log(`   ⏭️  Migration ${migrationName} already applied, skipping`);
-      return;
+    // Special handling for initial schema migration
+    // If it's marked as applied but tables don't exist, reset it
+    if (migrationName === '0001-initial-schema') {
+      if (await isMigrationApplied(migrationName)) {
+        // Check if hostels table exists (a key table that should exist after initial schema)
+        const hostelsExists = await tableExists('hostels');
+        if (!hostelsExists) {
+          console.log(`   ⚠️  Migration ${migrationName} marked as applied but tables don't exist`);
+          console.log(`   🔄 Resetting and re-running migration ${migrationName}...`);
+          // Delete the migration record
+          await pool.query(
+            'DELETE FROM schema_migrations WHERE migration_name = $1',
+            [migrationName]
+          );
+        } else {
+          console.log(`   ⏭️  Migration ${migrationName} already applied, skipping`);
+          return;
+        }
+      }
+    } else {
+      // For other migrations, just check if already applied
+      if (await isMigrationApplied(migrationName)) {
+        console.log(`   ⏭️  Migration ${migrationName} already applied, skipping`);
+        return;
+      }
     }
     
     // Read and execute migration
@@ -209,7 +249,12 @@ export async function runMigrations(): Promise<void> {
     for (const migrationFile of migrationFiles) {
       const migrationName = path.basename(migrationFile, path.extname(migrationFile));
       
-      if (!appliedMigrations.includes(migrationName)) {
+      // Special handling: Always check migration 0001 to see if tables exist
+      // even if it's marked as applied
+      const shouldRun = !appliedMigrations.includes(migrationName) || 
+                       (migrationName === '0001-initial-schema' && !(await tableExists('hostels')));
+      
+      if (shouldRun) {
         try {
           await runMigration(migrationFile);
           appliedCount++;
@@ -219,6 +264,8 @@ export async function runMigrations(): Promise<void> {
           console.log(`   Continuing with next migration...`);
           // Continue with next migration instead of crashing
         }
+      } else if (appliedMigrations.includes(migrationName)) {
+        console.log(`   ⏭️  Migration ${migrationName} already applied, skipping`);
       }
     }
     

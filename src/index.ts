@@ -25,6 +25,10 @@ import publicRoutes from './routes/public';
 import hostelImagesRoutes from './routes/hostel-images';
 import bookingsRoutes from './routes/bookings';
 import auditLogsRoutes from './routes/audit-logs';
+import mobileRoutes from './routes/mobile';
+import usersRoutes from './routes/users';
+import reservationsRoutes from './routes/reservations';
+import studentDashboardRoutes from './routes/student-dashboard';
 import { SubscriptionNotificationService } from './services/subscriptionNotificationService';
 import { SemesterService } from './services/semesterService';
 import { EmailService } from './services/emailService';
@@ -192,8 +196,12 @@ app.use('/api/subscription-plans', writeLimiter, subscriptionPlansRoutes);
 app.use('/api/semesters', writeLimiter, semestersRoutes);
 app.use('/api/bookings', writeLimiter, bookingsRoutes);
 app.use('/api/audit-logs', auditLogsRoutes);
+app.use('/api/mobile', mobileRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/hostels', hostelImagesRoutes);
+app.use('/api/users', usersRoutes);
+app.use('/api/reservations', writeLimiter, reservationsRoutes);
+app.use('/api/student-dashboard', studentDashboardRoutes);
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), 'uploads');

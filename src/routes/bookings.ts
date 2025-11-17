@@ -75,12 +75,19 @@ async function ensureRoomCapacity(roomId: number, semesterId: number): Promise<{
           WHERE pb.room_id = r.id
             AND pb.semester_id = $2
             AND pb.status IN ('pending', 'booked', 'checked_in')
+            AND pb.status NOT IN ('no_show', 'cancelled', 'expired')
         ), 0) +
         COALESCE((
           SELECT COUNT(*) FROM student_room_assignments sra
           WHERE sra.room_id = r.id
             AND sra.status = 'active'
             AND (sra.semester_id = $2 OR $2 IS NULL)
+        ), 0) +
+        COALESCE((
+          SELECT COUNT(*) FROM room_reservations rr
+          WHERE rr.room_id = r.id
+            AND rr.reserved_for_semester_id = $2
+            AND rr.status IN ('active', 'confirmed')
         ), 0) AS occupied
       FROM rooms r
       WHERE r.id = $1
@@ -1182,6 +1189,8 @@ router.post('/:id/payments', async (req, res) => {
     if (updatedBooking.room_id && updatedBooking.semester_id && updatedBooking.student_email) {
       try {
         const { StudentRegistrationService } = require('../utils/studentRegistration');
+        const bcrypt = require('bcryptjs');
+        const { CredentialGenerator } = require('../utils/credentialGenerator');
         
         // Use booking's amount_due as total amount (not room price)
         const bookingTotalAmount = parseFloat(updatedBooking.amount_due || '0');
@@ -1229,6 +1238,51 @@ router.post('/:id/payments', async (req, res) => {
         
         // Update room occupancy after registration
         await StudentRegistrationService.updateRoomOccupancy(client, updatedBooking.room_id);
+
+        // If this payment cleared the booking (transitioned to fully paid), send app credentials
+        const outstandingAfter = Math.max(0, bookingTotalAmount - bookingAmountPaid);
+        if (outstandingBefore > 0 && outstandingAfter <= 0) {
+          try {
+            // Generate a temporary password, set it, and mark as temporary if the column exists
+            const tempPassword = CredentialGenerator.generatePatternPassword();
+            const hashed = await bcrypt.hash(tempPassword, 10);
+
+            const colCheck = await client.query(
+              `SELECT column_name 
+               FROM information_schema.columns 
+               WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'password_is_temp'`
+            );
+            if (colCheck.rows.length > 0) {
+              await client.query(
+                'UPDATE users SET password = $1, password_is_temp = true, updated_at = NOW() WHERE id = $2',
+                [hashed, registrationResult.userId]
+              );
+            } else {
+              await client.query('UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2', [
+                hashed,
+                registrationResult.userId,
+              ]);
+            }
+
+            const loginBase = (process.env.FRONTEND_URL || '').trim() || 'http://localhost:3000';
+            const loginUrl = `${loginBase.replace(/\/$/, '')}/login`;
+            const credsHtml = EmailService.generateStudentWelcomeEmail(
+              updatedBooking.student_name,
+              updatedBooking.student_email,
+              updatedBooking.student_email,
+              tempPassword,
+              hostelName || 'Hostel',
+              loginUrl
+            );
+            await EmailService.sendEmail({
+              to: updatedBooking.student_email,
+              subject: `Your RooMio App Credentials - ${hostelName || 'Hostel'}`,
+              html: credsHtml,
+            });
+          } catch (credsErr:any) {
+            console.warn('Booking fully-paid credentials email failed (non-blocking):', credsErr?.message || credsErr);
+          }
+        }
       } catch (registrationError: any) {
         // Log error but don't fail the payment - student might already be registered
         // The registerStudent function handles existing students gracefully
@@ -1435,6 +1489,97 @@ router.get('/verify/:code', async (req, res) => {
   } catch (error) {
     console.error('Verify booking code error:', error);
     return res.status(500).json({ success: false, message: 'Failed to verify booking' });
+  }
+});
+
+/**
+ * POST /api/bookings/:id/mark-no-show
+ * Mark a booking as no-show (only custodians)
+ */
+router.post('/:id/mark-no-show', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const currentUser = await authenticateRequest(req);
+    if (!currentUser) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Only custodians can mark bookings as no-show
+    if (currentUser.role !== 'custodian') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only custodians can mark bookings as no-show',
+      });
+    }
+
+    const bookingId = parseInt(req.params.id, 10);
+    if (Number.isNaN(bookingId)) {
+      return res.status(400).json({ success: false, message: 'Invalid booking id' });
+    }
+
+    const requestedHostelId = req.query.hostel_id ? parseInt(String(req.query.hostel_id), 10) : null;
+    const allowedHostelId = await resolveHostelIdForUser(currentUser, requestedHostelId);
+
+    await client.query('BEGIN');
+
+    // Verify booking exists and belongs to this hostel
+    const bookingResult = await client.query(
+      `
+      SELECT id, status, room_id, semester_id
+      FROM public_hostel_bookings
+      WHERE id = $1 AND hostel_id = $2
+      FOR UPDATE
+      `,
+      [bookingId, allowedHostelId]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Can only mark pending or booked as no-show (not already checked in or cancelled)
+    if (booking.status === 'checked_in') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot mark checked-in booking as no-show',
+      });
+    }
+
+    if (booking.status === 'no_show' || booking.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: `Booking is already ${booking.status}`,
+      });
+    }
+
+    // Update booking status to no_show
+    await client.query(
+      `
+      UPDATE public_hostel_bookings
+      SET status = 'no_show',
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [bookingId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Booking marked as no-show. Room space has been released.',
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Mark no-show error:', error);
+    res.status(500).json({ success: false, message: 'Failed to mark booking as no-show' });
+  } finally {
+    client.release();
   }
 });
 
