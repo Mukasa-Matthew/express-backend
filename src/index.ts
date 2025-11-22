@@ -131,20 +131,28 @@ const corsOptions = {
     
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
+      console.log(`✅ CORS allowed (no origin): ${origin || 'null'}`);
       return callback(null, true);
     }
     
     // If wildcard is used, allow all origins
     if (allowedOrigins === '*') {
+      console.log(`✅ CORS allowed (wildcard): ${origin}`);
       return callback(null, true);
     }
     
     // Normalize origin for comparison (remove trailing slashes, convert to lowercase)
     const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '').trim();
     
-    // Special case: explicitly allow the problematic origin
-    if (normalizedOrigin === 'http://64.23.169.136:3000' || normalizedOrigin === 'https://64.23.169.136:3000') {
-      console.log(`✅ CORS allowed (explicit): ${origin}`);
+    // Special case: explicitly allow the problematic origin FIRST (before normalization check)
+    const problematicOrigins = [
+      'http://64.23.169.136:3000',
+      'https://64.23.169.136:3000',
+      'http://64.23.169.136',
+      'https://64.23.169.136'
+    ];
+    if (problematicOrigins.some(po => origin.toLowerCase().includes(po.toLowerCase()))) {
+      console.log(`✅ CORS allowed (explicit match): ${origin}`);
       return callback(null, true);
     }
     
@@ -153,45 +161,103 @@ const corsOptions = {
       const normalizedAllowed = allowedOrigins.map(o => o.toLowerCase().replace(/\/$/, '').trim());
       
       if (normalizedAllowed.includes(normalizedOrigin)) {
+        console.log(`✅ CORS allowed (in list): ${origin}`);
         return callback(null, true);
       }
     }
     
     // Allow Vercel preview deployments (any subdomain.vercel.app)
     if (origin.endsWith('.vercel.app')) {
+      console.log(`✅ CORS allowed (Vercel): ${origin}`);
       return callback(null, true);
     }
     
     // Allow Netlify preview deployments (pattern: *--*.netlify.app or *.netlify.app)
     if (origin.includes('.netlify.app')) {
+      console.log(`✅ CORS allowed (Netlify): ${origin}`);
       return callback(null, true);
     }
     
-    // Allow IP-based origins on common ports (development/testing)
-    const ipPortPattern = /^https?:\/\/\d+\.\d+\.\d+\.\d+(:\d+)?$/;
+    // Allow IP-based origins on any port (development/testing)
+    const ipPortPattern = /^https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/;
     if (ipPortPattern.test(origin)) {
       console.log(`✅ CORS allowed (IP-based origin): ${origin}`);
       return callback(null, true);
     }
     
     // Log for debugging
-    console.log(`⚠️  CORS blocked origin: ${origin}`);
+    console.log(`❌ CORS blocked origin: ${origin}`);
     console.log(`   Normalized origin: ${normalizedOrigin}`);
     console.log(`   Allowed origins: ${Array.isArray(allowedOrigins) ? allowedOrigins.join(', ') : allowedOrigins}`);
     
     // Reject if not in allowed list and doesn't match patterns
-    callback(new Error('Not allowed by CORS'));
+    callback(new Error(`CORS: Origin ${origin} not allowed`));
   },
   credentials: true, // Allow cookies and authorization headers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  optionsSuccessStatus: 200, // Some legacy browsers choke on 204
 };
 
+// Apply CORS middleware BEFORE other middleware
 app.use(cors(corsOptions));
 
-// Handle OPTIONS preflight requests explicitly
-app.options('*', cors(corsOptions));
+// Additional CORS middleware to ensure headers are always set (backup)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  // Always set CORS headers if origin is present
+  if (origin) {
+    // Check if origin should be allowed (same logic as corsOptions)
+    const allowedOrigins = getCorsOrigins();
+    const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '').trim();
+    
+    const shouldAllow = 
+      allowedOrigins === '*' ||
+      (Array.isArray(allowedOrigins) && allowedOrigins.some(o => o.toLowerCase().replace(/\/$/, '').trim() === normalizedOrigin)) ||
+      normalizedOrigin.includes('64.23.169.136') ||
+      origin.endsWith('.vercel.app') ||
+      origin.includes('.netlify.app') ||
+      /^https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin);
+    
+    if (shouldAllow) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Content-Range');
+    }
+  }
+  
+  next();
+});
+
+// Handle OPTIONS preflight requests explicitly for all routes
+app.options('*', (req, res) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    const allowedOrigins = getCorsOrigins();
+    const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '').trim();
+    
+    const shouldAllow = 
+      allowedOrigins === '*' ||
+      (Array.isArray(allowedOrigins) && allowedOrigins.some(o => o.toLowerCase().replace(/\/$/, '').trim() === normalizedOrigin)) ||
+      normalizedOrigin.includes('64.23.169.136') ||
+      origin.endsWith('.vercel.app') ||
+      origin.includes('.netlify.app') ||
+      /^https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin);
+    
+    if (shouldAllow) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+      res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+    }
+  }
+  res.status(200).end();
+});
 
 // Log CORS configuration on startup
 const corsOrigins = getCorsOrigins();
