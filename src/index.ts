@@ -137,10 +137,21 @@ const corsOptions = {
     
     // Check if origin is in allowed list
     if (Array.isArray(allowedOrigins) && allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+      return callback(null, true);
     }
+    
+    // Allow Vercel preview deployments (any subdomain.vercel.app)
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    
+    // Allow Netlify preview deployments (pattern: *--*.netlify.app or *.netlify.app)
+    if (origin.includes('.netlify.app')) {
+      return callback(null, true);
+    }
+    
+    // Reject if not in allowed list and doesn't match patterns
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true, // Allow cookies and authorization headers
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -158,6 +169,7 @@ if (Array.isArray(corsOrigins)) {
 } else {
   console.log(`   Allowed origins: ${corsOrigins} (${corsOrigins === '*' ? 'ALL - Development mode' : 'configured'})`);
 }
+console.log(`   Also allowing: *.vercel.app, *.netlify.app (preview deployments)`);
 console.log(`   Credentials: enabled`);
 console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
 

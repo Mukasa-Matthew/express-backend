@@ -72,6 +72,20 @@ router.get('/hostels', async (req, res) => {
       ? `WHERE ${whereConditions.join(' AND ')}` 
       : (min_available_rooms ? 'WHERE TRUE' : '');
 
+    // Check what column student_room_assignments uses (student_id or user_id)
+    const sraColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'student_room_assignments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
         // Get hostels with university and region info
     // Calculate available rooms dynamically based on room assignments
     // Use a subquery to calculate available rooms for each hostel
@@ -87,15 +101,15 @@ router.get('/hostels', async (req, res) => {
         FROM hostels h
         LEFT JOIN rooms r ON r.hostel_id = h.id
         LEFT JOIN LATERAL (
-          SELECT COUNT(DISTINCT sra.user_id) as current_occupants
+          SELECT COUNT(DISTINCT se.user_id) as current_occupants
           FROM student_room_assignments sra
-          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          INNER JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumn}
           WHERE sra.room_id = r.id 
             AND sra.status = 'active'
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = sra.user_id 
+              WHERE p.user_id = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) occupant_count ON true
@@ -396,6 +410,20 @@ router.get('/hostels/:id', async (req, res) => {
     );
     const roomSelfContainedSelect = roomSelfContainedColumnCheck.rowCount ? 'r.self_contained' : 'NULL::boolean AS self_contained';
 
+    // Check what column student_room_assignments uses (student_id or user_id)
+    const sraColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'student_room_assignments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     const roomsListQuery = `
       SELECT
         r.id,
@@ -414,15 +442,15 @@ router.get('/hostels/:id', async (req, res) => {
         ) AS available_spaces
       FROM rooms r
         LEFT JOIN LATERAL (
-          SELECT COUNT(DISTINCT sra.user_id) AS active_count
+          SELECT COUNT(DISTINCT se.user_id) AS active_count
           FROM student_room_assignments sra
-          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          INNER JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumn}
           WHERE sra.room_id = r.id 
             AND sra.status = 'active'
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = sra.user_id 
+              WHERE p.user_id = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) active_assignments ON TRUE
@@ -1084,6 +1112,20 @@ router.post('/hostels/:id/bookings', async (req, res) => {
     const inserted = await client.query(insertQuery, values);
     const booking = inserted.rows[0];
 
+    // Check what column student_room_assignments uses (student_id or user_id)
+    const sraColumnCheckForBooking = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'student_room_assignments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const sraUserIdColumnForBooking = sraColumnCheckForBooking.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : sraColumnCheckForBooking.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     const availabilityQuery = `
       SELECT 
           COUNT(DISTINCT CASE 
@@ -1094,15 +1136,15 @@ router.post('/hostels/:id/bookings', async (req, res) => {
         END) AS available_rooms
       FROM rooms r
         LEFT JOIN LATERAL (
-          SELECT COUNT(DISTINCT sra.user_id) AS active_count
+          SELECT COUNT(DISTINCT se.user_id) AS active_count
           FROM student_room_assignments sra
-          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          INNER JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumnForBooking}
           WHERE sra.room_id = r.id 
             AND sra.status = 'active'
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = sra.user_id 
+              WHERE p.user_id = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) active_assignments ON TRUE
