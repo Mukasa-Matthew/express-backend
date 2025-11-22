@@ -62,8 +62,12 @@ const DEFAULT_PUBLIC_ORIGINS = [
   'https://www.chatgpt.com',
   'http://64.23.169.136',
   'http://64.23.169.136:3000',
+  'https://64.23.169.136',
+  'https://64.23.169.136:3000',
   'https://roomiohostels.netlify.app',
   'http://64.23.169.136:80',
+  'http://64.23.169.136:443',
+  'https://64.23.169.136:443',
 ];
 
 const DEFAULT_DEV_ORIGINS = [
@@ -136,11 +140,18 @@ const corsOptions = {
     }
     
     // Normalize origin for comparison (remove trailing slashes, convert to lowercase)
-    const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '');
+    const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '').trim();
+    
+    // Special case: explicitly allow the problematic origin
+    if (normalizedOrigin === 'http://64.23.169.136:3000' || normalizedOrigin === 'https://64.23.169.136:3000') {
+      console.log(`✅ CORS allowed (explicit): ${origin}`);
+      return callback(null, true);
+    }
     
     // Check if origin is in allowed list (normalize allowed origins too)
     if (Array.isArray(allowedOrigins)) {
-      const normalizedAllowed = allowedOrigins.map(o => o.toLowerCase().replace(/\/$/, ''));
+      const normalizedAllowed = allowedOrigins.map(o => o.toLowerCase().replace(/\/$/, '').trim());
+      
       if (normalizedAllowed.includes(normalizedOrigin)) {
         return callback(null, true);
       }
@@ -156,8 +167,16 @@ const corsOptions = {
       return callback(null, true);
     }
     
+    // Allow IP-based origins on common ports (development/testing)
+    const ipPortPattern = /^https?:\/\/\d+\.\d+\.\d+\.\d+(:\d+)?$/;
+    if (ipPortPattern.test(origin)) {
+      console.log(`✅ CORS allowed (IP-based origin): ${origin}`);
+      return callback(null, true);
+    }
+    
     // Log for debugging
     console.log(`⚠️  CORS blocked origin: ${origin}`);
+    console.log(`   Normalized origin: ${normalizedOrigin}`);
     console.log(`   Allowed origins: ${Array.isArray(allowedOrigins) ? allowedOrigins.join(', ') : allowedOrigins}`);
     
     // Reject if not in allowed list and doesn't match patterns
@@ -171,16 +190,21 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+// Handle OPTIONS preflight requests explicitly
+app.options('*', cors(corsOptions));
+
 // Log CORS configuration on startup
 const corsOrigins = getCorsOrigins();
 console.log('🌐 CORS Configuration:');
 if (Array.isArray(corsOrigins)) {
   console.log(`   Allowed origins: ${corsOrigins.join(', ')}`);
+  console.log(`   Total allowed origins: ${corsOrigins.length}`);
 } else {
   console.log(`   Allowed origins: ${corsOrigins} (${corsOrigins === '*' ? 'ALL - Development mode' : 'configured'})`);
 }
 console.log(`   Also allowing: *.vercel.app, *.netlify.app (preview deployments)`);
 console.log(`   Credentials: enabled`);
+console.log(`   Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS`);
 console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
 
 // Body parsers with sane limits
