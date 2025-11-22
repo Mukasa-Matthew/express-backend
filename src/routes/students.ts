@@ -69,6 +69,20 @@ router.get('/', async (req, res) => {
     `);
     const hasStudentProfiles = studentProfilesCheck.rows[0]?.exists || false;
 
+    // Check what column student_room_assignments uses (student_id or user_id)
+    const sraColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'student_room_assignments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     // Pagination
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
@@ -110,7 +124,7 @@ router.get('/', async (req, res) => {
                AND (se.id IS NULL OR phb.semester_id = se.semester_id OR phb.semester_id IS NULL)
                AND pbp.status = 'completed'
              ) as payment_count,
-             (SELECT room_number FROM rooms r WHERE r.id = (SELECT room_id FROM student_room_assignments sra WHERE sra.user_id = u.id AND sra.status = 'active' LIMIT 1)) as room_number
+             (SELECT room_number FROM rooms r WHERE r.id = (SELECT room_id FROM student_room_assignments sra WHERE sra.${sraUserIdColumn} = u.id AND sra.status = 'active' LIMIT 1)) as room_number
       FROM users u
       ${studentProfileJoin}
       LEFT JOIN semester_enrollments se ON se.user_id = u.id
