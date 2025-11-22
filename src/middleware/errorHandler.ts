@@ -11,14 +11,22 @@ export function errorHandler(
   res: Response,
   next: NextFunction
 ): void {
+  // Log error details
   console.error('Error:', {
     message: err.message,
     stack: err.stack,
     url: req.url,
     method: req.method,
     ip: req.ip,
+    origin: req.headers.origin,
     timestamp: new Date().toISOString(),
   });
+
+  // Ensure CORS headers are set even on errors (if origin is present)
+  if (req.headers.origin) {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
 
   // Handle known error types
   if (err.name === 'ValidationError') {

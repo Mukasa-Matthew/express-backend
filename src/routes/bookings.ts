@@ -1057,10 +1057,20 @@ router.get('/:id', async (req, res) => {
 router.post('/:id/payments', async (req, res) => {
   const client = await pool.connect();
   try {
+    console.log('[Payment] Request received:', {
+      bookingId: req.params.id,
+      hostelId: req.query.hostel_id,
+      origin: req.headers.origin,
+      method: req.method,
+      url: req.url,
+    });
+
     const currentUser = await authenticateRequest(req);
     if (!currentUser) {
+      console.log('[Payment] Authentication failed');
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
+    console.log('[Payment] Authenticated user:', { id: currentUser.id, role: currentUser.role });
 
     // Only custodians can record payments for bookings
     if (currentUser.role !== 'custodian') {
@@ -1330,9 +1340,19 @@ router.post('/:id/payments', async (req, res) => {
       },
     });
   } catch (error: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {}); // Ignore rollback errors
     console.error('Record booking payment error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to record payment' });
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+    });
+    return res.status(500).json({ 
+      success: false, 
+      message: process.env.NODE_ENV === 'production' 
+        ? 'Failed to record payment' 
+        : error.message || 'Failed to record payment' 
+    });
   } finally {
     client.release();
   }
