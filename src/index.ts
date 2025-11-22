@@ -135,9 +135,15 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    // Check if origin is in allowed list
-    if (Array.isArray(allowedOrigins) && allowedOrigins.includes(origin)) {
-      return callback(null, true);
+    // Normalize origin for comparison (remove trailing slashes, convert to lowercase)
+    const normalizedOrigin = origin.toLowerCase().replace(/\/$/, '');
+    
+    // Check if origin is in allowed list (normalize allowed origins too)
+    if (Array.isArray(allowedOrigins)) {
+      const normalizedAllowed = allowedOrigins.map(o => o.toLowerCase().replace(/\/$/, ''));
+      if (normalizedAllowed.includes(normalizedOrigin)) {
+        return callback(null, true);
+      }
     }
     
     // Allow Vercel preview deployments (any subdomain.vercel.app)
@@ -149,6 +155,10 @@ const corsOptions = {
     if (origin.includes('.netlify.app')) {
       return callback(null, true);
     }
+    
+    // Log for debugging
+    console.log(`⚠️  CORS blocked origin: ${origin}`);
+    console.log(`   Allowed origins: ${Array.isArray(allowedOrigins) ? allowedOrigins.join(', ') : allowedOrigins}`);
     
     // Reject if not in allowed list and doesn't match patterns
     callback(new Error('Not allowed by CORS'));
