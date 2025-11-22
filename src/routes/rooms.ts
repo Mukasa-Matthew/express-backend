@@ -101,6 +101,34 @@ router.get('/available', async (req, res) => {
     const tableCheck = await pool.query("SELECT to_regclass('public.public_hostel_bookings') AS table_ref");
     const hasPublicBookings = Boolean(tableCheck.rows[0]?.table_ref);
 
+    // Check what column student_room_assignments uses (student_id or user_id)
+    const sraColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'student_room_assignments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
+    // Check what column payments uses (student_id or user_id)
+    const paymentColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'payments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const paymentUserIdColumn = paymentColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : paymentColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     const params: any[] = [hostelId];
     let nextIndex = 2;
 
@@ -151,15 +179,15 @@ router.get('/available', async (req, res) => {
           (r.capacity - COALESCE(active_assignments.active_count, 0) - COALESCE(pending_bookings.booking_count, 0) - COALESCE(reservations.reservation_count, 0)) AS available_spaces
         FROM rooms r
         LEFT JOIN LATERAL (
-          SELECT COUNT(DISTINCT sra.user_id) AS active_count
+          SELECT COUNT(DISTINCT se.user_id) AS active_count
           FROM student_room_assignments sra
-          INNER JOIN semester_enrollments se ON se.user_id = sra.user_id
+          INNER JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumn}
           WHERE sra.room_id = r.id
             AND sra.status = 'active'
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = sra.user_id 
+              WHERE p.${paymentUserIdColumn} = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
             ${assignmentsSemesterFilter}
@@ -323,17 +351,45 @@ router.put('/:id', async (req: Request, res) => {
 
     // If marking as available, check current capacity - allow if not full
     if (status === 'available') {
+      // Check what column student_room_assignments uses (student_id or user_id)
+      const sraColumnCheck = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'student_room_assignments'
+          AND column_name IN ('user_id', 'student_id')
+      `);
+      const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+        ? 'user_id' 
+        : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+        ? 'student_id'
+        : 'user_id'; // fallback
+
+      // Check what column payments uses (student_id or user_id)
+      const paymentColumnCheck = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'payments'
+          AND column_name IN ('user_id', 'student_id')
+      `);
+      const paymentUserIdColumn = paymentColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+        ? 'user_id' 
+        : paymentColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+        ? 'student_id'
+        : 'user_id'; // fallback
+
       const active = await pool.query(
-        `SELECT r.capacity, COALESCE(COUNT(DISTINCT sra.user_id), 0) as current_occupants
+        `SELECT r.capacity, COALESCE(COUNT(DISTINCT se.user_id), 0) as current_occupants
          FROM rooms r
          LEFT JOIN student_room_assignments sra ON r.id = sra.room_id AND sra.status = 'active'
-         LEFT JOIN semester_enrollments se ON se.user_id = sra.user_id
+         LEFT JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumn}
          WHERE r.id = $1
-           AND (sra.user_id IS NULL OR (
+           AND (sra.${sraUserIdColumn} IS NULL OR (
              se.balance IS NOT NULL
              AND EXISTS (
                SELECT 1 FROM payments p 
-               WHERE p.user_id = sra.user_id 
+               WHERE p.${paymentUserIdColumn} = se.user_id 
                AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
              )
            ))
