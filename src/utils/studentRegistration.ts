@@ -212,8 +212,21 @@ export class StudentRegistrationService {
     const amountPaid = typeof data.initialPaymentAmount === 'number' ? data.initialPaymentAmount : parseFloat(String(data.initialPaymentAmount || '0'));
     const balance = Math.max(0, totalAmount - amountPaid);
     
-    const enrollmentResult = await client.query(
-      `INSERT INTO semester_enrollments (
+    // Check if room_id column exists in semester_enrollments
+    const roomIdColumnCheck = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'semester_enrollments'
+        AND column_name = 'room_id'
+    `);
+    const hasRoomIdColumn = roomIdColumnCheck.rows.length > 0;
+    
+    let enrollmentQuery: string;
+    let enrollmentParams: any[];
+    
+    if (hasRoomIdColumn) {
+      enrollmentQuery = `INSERT INTO semester_enrollments (
         user_id, semester_id, room_id, enrollment_status,
         total_amount, amount_paid, balance, enrollment_date, created_at, updated_at
       ) VALUES ($1, $2, $3, 'active', $4::numeric, $5::numeric, $6::numeric, NOW(), NOW(), NOW())
@@ -224,16 +237,37 @@ export class StudentRegistrationService {
         amount_paid = EXCLUDED.amount_paid,
         balance = EXCLUDED.balance,
         updated_at = NOW()
-      RETURNING id`,
-      [
+      RETURNING id`;
+      enrollmentParams = [
         userId,
         data.semesterId,
         data.roomId,
         totalAmount,
         amountPaid,
         balance,
-      ]
-    );
+      ];
+    } else {
+      enrollmentQuery = `INSERT INTO semester_enrollments (
+        user_id, semester_id, enrollment_status,
+        total_amount, amount_paid, balance, enrollment_date, created_at, updated_at
+      ) VALUES ($1, $2, 'active', $3::numeric, $4::numeric, $5::numeric, NOW(), NOW(), NOW())
+      ON CONFLICT (user_id, semester_id)
+      DO UPDATE SET
+        total_amount = EXCLUDED.total_amount,
+        amount_paid = EXCLUDED.amount_paid,
+        balance = EXCLUDED.balance,
+        updated_at = NOW()
+      RETURNING id`;
+      enrollmentParams = [
+        userId,
+        data.semesterId,
+        totalAmount,
+        amountPaid,
+        balance,
+      ];
+    }
+    
+    const enrollmentResult = await client.query(enrollmentQuery, enrollmentParams);
     const enrollmentId = enrollmentResult.rows[0].id;
 
     // Create room assignment
