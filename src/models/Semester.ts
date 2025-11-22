@@ -385,14 +385,36 @@ export class SemesterEnrollmentModel {
     userId: number,
     roomId: number | null = null
   ): Promise<SemesterEnrollment> {
-    const result = await pool.query(
-      `INSERT INTO semester_enrollments (semester_id, user_id, room_id, enrollment_status)
-       VALUES ($1, $2, $3, 'active')
-       ON CONFLICT (semester_id, user_id) 
-       DO UPDATE SET enrollment_status = 'active', updated_at = NOW()
-       RETURNING *`,
-      [semesterId, userId, roomId]
-    );
+    // Check if room_id column exists in semester_enrollments
+    const roomIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'semester_enrollments'
+        AND column_name = 'room_id'
+    `);
+    const hasRoomIdColumn = roomIdColumnCheck.rows.length > 0;
+
+    let query: string;
+    let params: any[];
+
+    if (hasRoomIdColumn) {
+      query = `INSERT INTO semester_enrollments (semester_id, user_id, room_id, enrollment_status)
+               VALUES ($1, $2, $3, 'active')
+               ON CONFLICT (semester_id, user_id) 
+               DO UPDATE SET enrollment_status = 'active', updated_at = NOW()
+               RETURNING *`;
+      params = [semesterId, userId, roomId];
+    } else {
+      query = `INSERT INTO semester_enrollments (semester_id, user_id, enrollment_status)
+               VALUES ($1, $2, 'active')
+               ON CONFLICT (semester_id, user_id) 
+               DO UPDATE SET enrollment_status = 'active', updated_at = NOW()
+               RETURNING *`;
+      params = [semesterId, userId];
+    }
+
+    const result = await pool.query(query, params);
     return result.rows[0];
   }
 
@@ -414,8 +436,19 @@ export class SemesterEnrollmentModel {
    * Get all enrollments for a semester
    */
   static async findBySemester(semesterId: number): Promise<SemesterEnrollment[]> {
-    const result = await pool.query(
-      `SELECT 
+    // Check if room_id column exists in semester_enrollments
+    const roomIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'semester_enrollments'
+        AND column_name = 'room_id'
+    `);
+    const hasRoomIdColumn = roomIdColumnCheck.rows.length > 0;
+
+    let query: string;
+    if (hasRoomIdColumn) {
+      query = `SELECT 
         se.*,
         u.name as user_name,
         u.email as user_email,
@@ -424,9 +457,20 @@ export class SemesterEnrollmentModel {
        LEFT JOIN users u ON se.user_id = u.id
        LEFT JOIN rooms r ON se.room_id = r.id
        WHERE se.semester_id = $1 
-       ORDER BY se.created_at DESC`,
-      [semesterId]
-    );
+       ORDER BY se.created_at DESC`;
+    } else {
+      query = `SELECT 
+        se.*,
+        u.name as user_name,
+        u.email as user_email,
+        NULL::text as room_number
+       FROM semester_enrollments se
+       LEFT JOIN users u ON se.user_id = u.id
+       WHERE se.semester_id = $1 
+       ORDER BY se.created_at DESC`;
+    }
+
+    const result = await pool.query(query, [semesterId]);
     return result.rows;
   }
 
@@ -491,13 +535,33 @@ export class SemesterEnrollmentModel {
         [enrollmentId]
       );
 
+      // Check if room_id column exists in semester_enrollments
+      const roomIdColumnCheck = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'semester_enrollments'
+          AND column_name = 'room_id'
+      `);
+      const hasRoomIdColumn = roomIdColumnCheck.rows.length > 0;
+
       // Create new enrollment
-      const result = await client.query(
-        `INSERT INTO semester_enrollments (semester_id, user_id, room_id, enrollment_status)
-         VALUES ($1, $2, $3, 'active')
-         RETURNING *`,
-        [newSemesterId, oldEnrollment.rows[0].user_id, oldEnrollment.rows[0].room_id]
-      );
+      let result;
+      if (hasRoomIdColumn) {
+        result = await client.query(
+          `INSERT INTO semester_enrollments (semester_id, user_id, room_id, enrollment_status)
+           VALUES ($1, $2, $3, 'active')
+           RETURNING *`,
+          [newSemesterId, oldEnrollment.rows[0].user_id, oldEnrollment.rows[0].room_id]
+        );
+      } else {
+        result = await client.query(
+          `INSERT INTO semester_enrollments (semester_id, user_id, enrollment_status)
+           VALUES ($1, $2, 'active')
+           RETURNING *`,
+          [newSemesterId, oldEnrollment.rows[0].user_id]
+        );
+      }
 
       await client.query('COMMIT');
       return result.rows[0];

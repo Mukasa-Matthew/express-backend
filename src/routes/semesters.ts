@@ -403,16 +403,56 @@ router.get('/:id/stats', async (req, res) => {
 
     stats.outstanding_balance = parseFloat(outstandingResult.rows[0]?.outstanding || 0);
 
+    // Check if room_id column exists in semester_enrollments
+    const roomIdColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'semester_enrollments'
+        AND column_name = 'room_id'
+    `);
+    const hasRoomIdColumn = roomIdColumnCheck.rows.length > 0;
+
     // Calculate occupancy rate
-    const occupancyResult = await pool.query(
-      `SELECT 
-        COUNT(DISTINCT r.id) as total_rooms,
-        COUNT(DISTINCT se.room_id) as occupied_rooms
-      FROM rooms r
-      LEFT JOIN semester_enrollments se ON r.id = se.room_id AND se.semester_id = $1 AND se.enrollment_status = 'active'
-      WHERE r.hostel_id = (SELECT hostel_id FROM semesters WHERE id = $1)`,
-      [semesterId]
-    );
+    // If room_id doesn't exist in semester_enrollments, use student_room_assignments instead
+    let occupancyResult;
+    if (hasRoomIdColumn) {
+      occupancyResult = await pool.query(
+        `SELECT 
+          COUNT(DISTINCT r.id) as total_rooms,
+          COUNT(DISTINCT se.room_id) as occupied_rooms
+        FROM rooms r
+        LEFT JOIN semester_enrollments se ON r.id = se.room_id AND se.semester_id = $1 AND se.enrollment_status = 'active'
+        WHERE r.hostel_id = (SELECT hostel_id FROM semesters WHERE id = $1)`,
+        [semesterId]
+      );
+    } else {
+      // Fallback: use student_room_assignments to calculate occupancy for this semester
+      const sraColumnCheck = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'student_room_assignments'
+          AND column_name IN ('user_id', 'student_id')
+      `);
+      const sraUserIdColumn = sraColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+        ? 'user_id' 
+        : sraColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+        ? 'student_id'
+        : 'user_id';
+
+      occupancyResult = await pool.query(
+        `SELECT 
+          COUNT(DISTINCT r.id) as total_rooms,
+          COUNT(DISTINCT sra.room_id) as occupied_rooms
+        FROM rooms r
+        LEFT JOIN student_room_assignments sra ON r.id = sra.room_id AND sra.status = 'active'
+        LEFT JOIN semester_enrollments se ON se.user_id = sra.${sraUserIdColumn} AND se.semester_id = $1 AND se.enrollment_status = 'active'
+        WHERE r.hostel_id = (SELECT hostel_id FROM semesters WHERE id = $1)
+        AND (se.id IS NOT NULL OR sra.id IS NULL)`,
+        [semesterId]
+      );
+    }
 
     const totalRooms = parseFloat(occupancyResult.rows[0]?.total_rooms || 0);
     const occupiedRooms = parseFloat(occupancyResult.rows[0]?.occupied_rooms || 0);
