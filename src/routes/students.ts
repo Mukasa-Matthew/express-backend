@@ -59,6 +59,16 @@ router.get('/', async (req, res) => {
       ? 'student_id'
       : 'user_id';
 
+    // Check if student_profiles table exists
+    const studentProfilesCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'student_profiles'
+      ) as exists
+    `);
+    const hasStudentProfiles = studentProfilesCheck.rows[0]?.exists || false;
+
     // Pagination
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
@@ -73,9 +83,19 @@ router.get('/', async (req, res) => {
     // 2. Have at least one payment recorded (from either payments or public_booking_payments tables)
     // Build query with proper column name substitution
     const paymentCol = paymentUserIdColumn;
+    
+    // Build student profile columns - use actual columns if table exists, otherwise NULL
+    const studentProfileSelect = hasStudentProfiles
+      ? 'sp.gender, sp.date_of_birth, sp.access_number, sp.phone, sp.whatsapp, sp.emergency_contact,'
+      : 'NULL::text as gender, NULL::date as date_of_birth, NULL::text as access_number, NULL::text as phone, NULL::text as whatsapp, NULL::text as emergency_contact,';
+    
+    const studentProfileJoin = hasStudentProfiles
+      ? 'LEFT JOIN student_profiles sp ON sp.user_id = u.id'
+      : '';
+    
     let query = `
       SELECT DISTINCT u.id, u.email, u.name, u.role, u.created_at,
-             sp.gender, sp.date_of_birth, sp.access_number, sp.phone, sp.whatsapp, sp.emergency_contact,
+             ${studentProfileSelect}
              se.total_amount, se.amount_paid, se.balance,
              (
                SELECT COUNT(*) 
@@ -92,7 +112,7 @@ router.get('/', async (req, res) => {
              ) as payment_count,
              (SELECT room_number FROM rooms r WHERE r.id = (SELECT room_id FROM student_room_assignments sra WHERE sra.user_id = u.id AND sra.status = 'active' LIMIT 1)) as room_number
       FROM users u
-      LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      ${studentProfileJoin}
       LEFT JOIN semester_enrollments se ON se.user_id = u.id
       WHERE u.hostel_id = $1 AND u.role = 'user'
         AND (
@@ -416,11 +436,29 @@ router.get('/:id', async (req, res) => {
     if (!hostelId) return res.status(403).json({ success: false, message: 'Forbidden' });
 
     const { id } = req.params;
+    // Check if student_profiles table exists
+    const studentProfilesCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'student_profiles'
+      ) as exists
+    `);
+    const hasStudentProfiles = studentProfilesCheck.rows[0]?.exists || false;
+    
+    const studentProfileSelect = hasStudentProfiles
+      ? 'sp.gender, sp.date_of_birth, sp.access_number, sp.phone, sp.whatsapp, sp.emergency_contact'
+      : 'NULL::text as gender, NULL::date as date_of_birth, NULL::text as access_number, NULL::text as phone, NULL::text as whatsapp, NULL::text as emergency_contact';
+    
+    const studentProfileJoin = hasStudentProfiles
+      ? 'LEFT JOIN student_profiles sp ON sp.user_id = u.id'
+      : '';
+
     const student = await pool.query(
       `SELECT u.id, u.email, u.name, u.role, u.created_at,
-              sp.gender, sp.date_of_birth, sp.access_number, sp.phone, sp.whatsapp, sp.emergency_contact
+              ${studentProfileSelect}
        FROM users u
-       LEFT JOIN student_profiles sp ON sp.user_id = u.id
+       ${studentProfileJoin}
        WHERE u.id = $1 AND u.hostel_id = $2 AND u.role = 'user'`,
       [id, hostelId]
     );
