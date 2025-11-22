@@ -86,6 +86,20 @@ router.get('/hostels', async (req, res) => {
       ? 'student_id'
       : 'user_id'; // fallback
 
+    // Check what column payments uses (student_id or user_id)
+    const paymentColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'payments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const paymentUserIdColumn = paymentColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : paymentColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
         // Get hostels with university and region info
     // Calculate available rooms dynamically based on room assignments
     // Use a subquery to calculate available rooms for each hostel
@@ -109,7 +123,7 @@ router.get('/hostels', async (req, res) => {
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = se.user_id 
+              WHERE p.${paymentUserIdColumn} = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) occupant_count ON true
@@ -424,6 +438,20 @@ router.get('/hostels/:id', async (req, res) => {
       ? 'student_id'
       : 'user_id'; // fallback
 
+    // Check what column payments uses (student_id or user_id)
+    const paymentColumnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'payments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const paymentUserIdColumn = paymentColumnCheck.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : paymentColumnCheck.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     const roomsListQuery = `
       SELECT
         r.id,
@@ -450,7 +478,7 @@ router.get('/hostels/:id', async (req, res) => {
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = se.user_id 
+              WHERE p.${paymentUserIdColumn} = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) active_assignments ON TRUE
@@ -1126,6 +1154,20 @@ router.post('/hostels/:id/bookings', async (req, res) => {
       ? 'student_id'
       : 'user_id'; // fallback
 
+    // Check what column payments uses (student_id or user_id)
+    const paymentColumnCheckForBooking = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+        AND table_name = 'payments'
+        AND column_name IN ('user_id', 'student_id')
+    `);
+    const paymentUserIdColumnForBooking = paymentColumnCheckForBooking.rows.find((r: any) => r.column_name === 'user_id') 
+      ? 'user_id' 
+      : paymentColumnCheckForBooking.rows.find((r: any) => r.column_name === 'student_id')
+      ? 'student_id'
+      : 'user_id'; // fallback
+
     const availabilityQuery = `
       SELECT 
           COUNT(DISTINCT CASE 
@@ -1144,7 +1186,7 @@ router.post('/hostels/:id/bookings', async (req, res) => {
             AND se.balance IS NOT NULL
             AND EXISTS (
               SELECT 1 FROM payments p 
-              WHERE p.user_id = se.user_id 
+              WHERE p.${paymentUserIdColumnForBooking} = se.user_id 
               AND (p.semester_id = se.semester_id OR p.semester_id IS NULL)
             )
         ) active_assignments ON TRUE
